@@ -4,6 +4,8 @@
     "username": "Brukernavn",
     "email": "E-post",
     "confirm_email": "Bekfreft e-post",
+    "delete_account": "Slett konto",
+    "delete_account_confirm": "Er du sikker på at du vil slette kontoen din?<br /><strong>Dette kan ikke reverseres, og du vil ikke kunne hente tilbake dine data.</strong><br /><br />Skriv inn ditt brukernavn for å bekrefte at du vil tilintetgjøre denne kontoen.",
     "fullname": "Fullt navn",
     "website": "Nettsted",
     "location": "Plassering",
@@ -50,6 +52,7 @@
     "digest_daily": "Daglig",
     "digest_weekly": "Ukentlig",
     "digest_monthly": "Månedlig",
+    "send_chat_notifications": "Send en epost hvis jeg mottar en chat-melding når jeg ikke er pålogget",
     "has_no_follower": "Denne brukeren har ingen følgere :(",
     "follows_no_one": "Denne brukeren følger ingen :(",
     "has_no_posts": "Denne brukeren har ikke skrevet noe enda.",
@@ -61,5 +64,7 @@
     "posts_per_page": "Innlegg per side",
     "notification_sounds": "Spill av en lyd når du mottar ett varsel.",
     "browsing": "Surfeinnstillinger",
-    "open_links_in_new_tab": "Åpne utgående linker i en ny fane?"
+    "open_links_in_new_tab": "Åpne utgående linker i en ny fane?",
+    "follow_topics_you_reply_to": "Følg emner du svarer i.",
+    "follow_topics_you_create": "Følg emner du oppretter."
 }

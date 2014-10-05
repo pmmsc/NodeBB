@@ -1,6 +1,8 @@
 'use strict';
 
-var user = require('../user'),
+var winston = require('winston'),
+	validator = require('validator'),
+	user = require('../user'),
 	translator = require('../../public/src/translator');
 
 module.exports = function(Meta) {
@@ -14,7 +16,14 @@ module.exports = function(Meta) {
 	};
 
 	Meta.title.build = function (urlFragment, language, callback) {
-		Meta.title.parseFragment(decodeURIComponent(urlFragment), language, function(err, title) {
+		var uri = '';
+		try {
+			uri = decodeURIComponent(urlFragment);
+		} catch(e) {
+			winston.error('Invalid url fragment : ' + urlFragment, e.stack);
+			return callback(null, Meta.config.browserTitle || 'NodeBB');
+		}
+		Meta.title.parseFragment(uri, language, function(err, title) {
 			if (err) {
 				title = Meta.config.browserTitle || 'NodeBB';
 			} else {
@@ -26,6 +35,7 @@ module.exports = function(Meta) {
 	};
 
 	Meta.title.parseFragment = function (urlFragment, language, callback) {
+		urlFragment = validator.escape(urlFragment);
 		var	translated = ['', 'recent', 'unread', 'users', 'notifications'];
 		if (translated.indexOf(urlFragment) !== -1) {
 			if (!urlFragment.length) {

@@ -31,7 +31,7 @@ var path = require('path'),
 			async.parallel([
 				function(next) {
 					var categoryUrls = [];
-					categories.getVisibleCategories(0, function(err, categoriesData) {
+					categories.getCategoriesByPrivilege(0, 'find', function(err, categoriesData) {
 						if (err) {
 							return next(err);
 						}
@@ -49,7 +49,7 @@ var path = require('path'),
 				},
 				function(next) {
 					var topicUrls = [];
-					topics.getTopicsFromSet(0, 'topics:recent', 0, -1, function(err, data) {
+					topics.getTopicsFromSet(0, 'topics:recent', 0, 49, function(err, data) {
 						if (err) {
 							return next(err);
 						}

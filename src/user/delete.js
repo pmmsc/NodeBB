@@ -6,8 +6,8 @@ var async = require('async'),
 	user = require('../user'),
 	topics = require('../topics'),
 	groups = require('../groups'),
-	plugins = require('../plugins');
-
+	plugins = require('../plugins'),
+	batch = require('../batch');
 
 module.exports = function(User) {
 
@@ -20,7 +20,7 @@ module.exports = function(User) {
 				deleteTopics(uid, next);
 			},
 			function(next) {
-				deleteAccount(uid, next);
+				User.deleteAccount(uid, next);
 			}
 		], callback);
 	};
@@ -34,16 +34,16 @@ module.exports = function(User) {
 	}
 
 	function deleteSortedSetElements(set, deleteMethod, callback) {
-		db.getSortedSetRange(set, 0, -1, function(err, ids) {
+		batch.processSortedSet(set, function(err, ids, next) {
 			if (err) {
 				return callback(err);
 			}
 
-			async.each(ids, deleteMethod, callback);
-		});
+			async.eachLimit(ids, 10, deleteMethod, next);
+		}, {alwaysStartAt: 0}, callback);
 	}
 
-	function deleteAccount(uid, callback) {
+	User.deleteAccount = function(uid, callback) {
 		user.getUserFields(uid, ['username', 'userslug', 'email'], function(err, userData) {
 			if (err)  {
 				return callback(err);
@@ -60,49 +60,18 @@ module.exports = function(User) {
 					db.deleteObjectField('email:uid', userData.email.toLowerCase(), next);
 				},
 				function(next) {
-					db.delete('uid:' + uid + ':notifications:read', next);
+					db.sortedSetsRemove(['users:joindate', 'users:postcount', 'users:reputation'], uid, next);
 				},
 				function(next) {
-					db.delete('uid:' + uid + ':notifications:unread', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':notifications:uniqueId:nid', next);
-				},
-				function(next) {
-					db.sortedSetRemove('users:joindate', uid, next);
-				},
-				function(next) {
-					db.sortedSetRemove('users:postcount', uid, next);
-				},
-				function(next) {
-					db.sortedSetRemove('users:reputation', uid, next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':favourites', next);
-				},
-				function(next) {
-					db.delete('user:' + uid + ':settings', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':topics', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':posts', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':chats', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':chats:unread', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':ip', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':upvote', next);
-				},
-				function(next) {
-					db.delete('uid:' + uid + ':downvote', next);
+					var keys = [
+						'uid:' + uid + ':notifications:read', 'uid:' + uid + ':notifications:unread',
+						'uid:' + uid + ':favourites', 'user:' + uid + ':settings',
+						'uid:' + uid + ':topics', 'uid:' + uid + ':posts',
+						'uid:' + uid + ':chats', 'uid:' + uid + ':chats:unread',
+						'uid:' + uid + ':ip', 'uid:' + uid + ':upvote', 'uid:' + uid + ':downvote',
+						'uid:' + uid + ':ignored:cids'
+					];
+					db.deleteAll(keys, next);
 				},
 				function(next) {
 					deleteUserFromFollowers(uid, next);
@@ -120,13 +89,7 @@ module.exports = function(User) {
 
 				async.parallel([
 					function(next) {
-						db.delete('followers:' + uid, next);
-					},
-					function(next) {
-						db.delete('following:' + uid, next);
-					},
-					function(next) {
-						db.delete('user:' + uid, next);
+						db.deleteAll(['followers:' + uid, 'following:' + uid, 'user:' + uid], next);
 					},
 					function(next) {
 						db.decrObjectField('global', 'userCount', next);
@@ -134,7 +97,7 @@ module.exports = function(User) {
 				], callback);
 			});
 		});
-	}
+	};
 
 	function deleteUserFromFollowers(uid, callback) {
 		db.getSetMembers('followers:' + uid, function(err, uids) {
@@ -142,9 +105,11 @@ module.exports = function(User) {
 				return callback(err);
 			}
 
-			async.each(uids, function(theiruid, next) {
-				db.setRemove('following:' + theiruid, uid, next);
-			}, callback);
+			var sets = uids.map(function(uid) {
+				return 'following:' + uid;
+			});
+
+			db.setsRemove(sets, uid, callback);
 		});
 	}
 };

@@ -1,6 +1,6 @@
 'use strict';
 
-/* globals define, ajaxify, socket, app, config, utils, translator */
+/* globals define, ajaxify, socket, app, config, utils, translator, bootbox */
 
 define('forum/account/edit', ['forum/account/header', 'uploader'], function(header, uploader) {
 	var AccountEdit = {},
@@ -26,6 +26,7 @@ define('forum/account/edit', ['forum/account/header', 'uploader'], function(head
 		currentEmail = $('#inputEmail').val();
 
 		handleImageChange();
+		handleAccountDelete();
 		handleImageUpload();
 		handleEmailConfirm();
 		handlePasswordChange();
@@ -125,7 +126,41 @@ define('forum/account/edit', ['forum/account/header', 'uploader'], function(head
 		});
 	}
 
+	function handleAccountDelete() {
+		$('#deleteAccountBtn').on('click', function() {
+			translator.translate('[[user:delete_account_confirm]]', function(translated) {
+				bootbox.confirm(translated + '<p><input type="text" class="form-control" id="confirm-username" /></p>', function(confirm) {
+					if (!confirm) {
+						return;
+					}
+
+					if ($('#confirm-username').val() !== app.username) {
+						app.alertError('[[error:invalid-username]]');
+						return false;
+					} else {
+						socket.emit('user.deleteAccount', {}, function(err) {
+							if (!err) {
+								app.logout();
+							}
+						});
+					}
+				});
+			});
+			return false;
+		});
+	}
+
 	function handleImageUpload() {
+		function onUploadComplete(urlOnServer) {
+			urlOnServer = urlOnServer + '?' + new Date().getTime();
+
+			$('#user-current-picture').attr('src', urlOnServer);
+			$('#user-uploaded-picture').attr('src', urlOnServer);
+			$('#user-header-picture').attr('src', urlOnServer);
+			uploadedPicture = urlOnServer;
+		}
+
+
 		$('#upload-picture-modal').on('hide', function() {
 			$('#userPhotoInput').val('');
 		});
@@ -134,15 +169,33 @@ define('forum/account/edit', ['forum/account/header', 'uploader'], function(head
 
 			$('#change-picture-modal').modal('hide');
 			uploader.open(config.relative_path + '/api/user/' + ajaxify.variables.get('userslug') + '/uploadpicture', {}, config.maximumProfileImageSize, function(imageUrlOnServer) {
-				imageUrlOnServer = imageUrlOnServer + '?' + new Date().getTime();
-
-				$('#user-current-picture').attr('src', imageUrlOnServer);
-				$('#user-uploaded-picture').attr('src', imageUrlOnServer);
-				$('#user-header-picture').attr('src', imageUrlOnServer);
-
-				uploadedPicture = imageUrlOnServer;
+				onUploadComplete(imageUrlOnServer);
 			});
 
+			return false;
+		});
+
+		$('#uploadFromUrlBtn').on('click', function() {
+			$('#change-picture-modal').modal('hide');
+			var uploadModal = $('#upload-picture-from-url-modal');
+			uploadModal.modal('show').removeClass('hide');
+
+			uploadModal.find('.upload-btn').on('click', function() {
+				var url = uploadModal.find('#uploadFromUrl').val();
+				if (!url) {
+					return;
+				}
+				socket.emit('user.uploadProfileImageFromUrl', url, function(err, imageUrlOnServer) {
+					if (err) {
+						return app.alertError(err.message);
+					}
+					onUploadComplete(imageUrlOnServer);
+
+					uploadModal.modal('hide');
+				});
+
+				return false;
+			});
 			return false;
 		});
 	}

@@ -3,7 +3,7 @@ node_modules/
 sftp-config.json
 config.json
 public/src/nodebb.min.js
-public/config.json
+!src/views/config.json
 public/css/*.css
 *.sublime-project
 *.sublime-workspace
@@ -26,3 +26,9 @@ pidfile
 # templates
 /public/templates
 /public/sounds
+
+# compiled files
+/public/stylesheet.css
+/public/admin.css
+/public/nodebb.min.js
+/public/nodebb.min.js.map

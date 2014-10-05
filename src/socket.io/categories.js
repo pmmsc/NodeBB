@@ -5,6 +5,7 @@ var	async = require('async'),
 	categories = require('../categories'),
 	privileges = require('../privileges'),
 	user = require('../user'),
+	topics = require('../topics'),
 	websockets = require('./index'),
 
 	SocketCategories = {};
@@ -24,7 +25,7 @@ SocketCategories.getRecentReplies = function(socket, cid, callback) {
 };
 
 SocketCategories.get = function(socket, data, callback) {
-	categories.getAllCategories(callback);
+	categories.getCategoriesByPrivilege(socket.uid, 'find', callback);
 };
 
 SocketCategories.loadMore = function(socket, data, callback) {
@@ -77,6 +78,28 @@ SocketCategories.lastTopicIndex = function(socket, cid, callback) {
 SocketCategories.getUsersInCategory = function(socket, cid, callback) {
 	var uids = websockets.getUidsInRoom('category_' + cid);
 	user.getMultipleUserFields(uids, ['uid', 'userslug', 'username', 'picture'], callback);
+};
+
+SocketCategories.getCategoriesByPrivilege = function(socket, privilege, callback) {
+	categories.getCategoriesByPrivilege(socket.uid, privilege, callback);
+};
+
+SocketCategories.watch = function(socket, cid, callback) {
+	user.watchCategory(socket.uid, cid, function(err) {
+		if (err) {
+			return callback(err);
+		}
+		topics.pushUnreadCount(socket.uid, callback);
+	});
+};
+
+SocketCategories.ignore = function(socket, cid, callback) {
+	user.ignoreCategory(socket.uid, cid, function(err) {
+		if (err) {
+			return callback(err);
+		}
+		topics.pushUnreadCount(socket.uid, callback);
+	});
 };
 
 module.exports = SocketCategories;

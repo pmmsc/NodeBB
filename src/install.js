@@ -29,7 +29,7 @@ questions.main = [
 	{
 		name: 'base_url',
 		description: 'URL used to access this NodeBB',
-		'default': nconf.get('base_url') || 'http://localhost:4567',
+		'default': nconf.get('base_url') + (nconf.get('use_port') ? ':' + nconf.get('port') : '') || 'http://localhost:4567',
 		pattern: /^http(?:s)?:\/\//,
 		message: 'Base URL must begin with \'http://\' or \'https://\'',
 	},
@@ -379,7 +379,7 @@ function createAdmin(callback) {
 function createCategories(next) {
 	var Categories = require('./categories');
 
-	Categories.getAllCategories(function (err, categoryData) {
+	Categories.getAllCategories(0, function (err, categoryData) {
 		if (err) {
 			return next(err);
 		}
@@ -413,22 +413,12 @@ function enableDefaultPlugins(next) {
 		'nodebb-widget-essentials',
 		'nodebb-plugin-soundpack-default'
 	];
-
-	async.each(defaultEnabled, function (pluginId, next) {
-		Plugins.isActive(pluginId, function (err, active) {
-			if (!active) {
-				Plugins.toggleActive(pluginId, function () {
-					next();
-				});
-			} else {
-				next();
-			}
-		});
-	}, next);
+	var	db = require('./database');
+	db.setAdd('plugins:active', defaultEnabled, next);
 }
 
 function setCopyrightWidget(next) {
-	var	db = require('./database.js');
+	var	db = require('./database');
 
 	db.init(function(err) {
 		if (!err) {

@@ -13,8 +13,11 @@
     "digest.latest_topics": "Aktuellste Themen vom %1",
     "digest.cta": "Klicke hier, um %1 zu besuchen",
     "digest.unsub.info": "Diese Zusammenfassung wurde dir aufgrund deiner Abonnement-Einstellungen gesendet.",
-    "digest.unsub.cta": "Klicke hier, um diese Einstellungen zu ändern",
     "digest.daily.no_topics": "Es gab heute keine aktiven Themen",
+    "notif.chat.subject": "Neue Chatnachricht von %1 erhalten",
+    "notif.chat.cta": "Klicke hier, um die Unterhaltung fortzusetzen",
+    "notif.chat.unsub.info": "Diese Chat-Benachrichtigung wurde dir aufgrund deiner Abonnement-Einstellungen gesendet.",
     "test.text1": "Dies ist eine Test-E-Mail, um zu überprüfen, ob der E-Mailer deines NodeBB korrekt eingestellt wurde.",
+    "unsub.cta": "Klicke hier, um diese Einstellungen zu ändern.",
     "closing": "Danke!"
 }

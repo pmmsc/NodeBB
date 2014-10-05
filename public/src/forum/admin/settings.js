@@ -1,5 +1,5 @@
 "use strict";
-/*global define, app, socket, RELATIVE_PATH */
+/*global define, app, socket, ajaxify, RELATIVE_PATH */
 
 define('forum/admin/settings', ['uploader', 'sounds'], function(uploader, sounds) {
 	var Settings = {};
@@ -21,6 +21,7 @@ define('forum/admin/settings', ['uploader', 'sounds'], function(uploader, sounds
 		var fields = $('#content [data-field]'),
 			numFields = fields.length,
 			saveBtn = $('#save'),
+			revertBtn = $('#revert'),
 			x, key, inputType, field;
 
 		for (x = 0; x < numFields; x++) {
@@ -31,6 +32,7 @@ define('forum/admin/settings', ['uploader', 'sounds'], function(uploader, sounds
 				if (app.config[key]) {
 					switch (inputType) {
 					case 'text':
+					case 'hidden':
 					case 'password':
 					case 'textarea':
 					case 'number':
@@ -53,49 +55,34 @@ define('forum/admin/settings', ['uploader', 'sounds'], function(uploader, sounds
 			}
 		}
 
+		revertBtn.off('click').on('click', function(e) {
+			ajaxify.refresh();
+		});
+
 		saveBtn.off('click').on('click', function(e) {
 			e.preventDefault();
-			var done = 0,
-				error;
 
-			for (x = 0; x < numFields; x++) {
-				saveField(fields[x], onFieldSaved);
-			}
-
-			function onFieldSaved(err) {
-				if (!error && err) {
-					error = err;
-				}
-
-				done++;
-				if (done === numFields) {
-					if (error) {
-						return app.alert({
-							alert_id: 'config_status',
-							timeout: 2500,
-							title: 'Changes Not Saved',
-							message: 'NodeBB encountered a problem saving your changes',
-							type: 'danger'
-						});
-					}
-					app.alert({
+			saveFields(fields, function onFieldsSaved(err) {
+				if (err) {
+					return app.alert({
 						alert_id: 'config_status',
 						timeout: 2500,
-						title: 'Changes Saved',
-						message: 'Your changes to the NodeBB configuration have been saved.',
-						type: 'success'
+						title: 'Changes Not Saved',
+						message: 'NodeBB encountered a problem saving your changes',
+						type: 'danger'
 					});
 				}
-			}
+				app.alert({
+					alert_id: 'config_status',
+					timeout: 2500,
+					title: 'Changes Saved',
+					message: 'Your changes to the NodeBB configuration have been saved.',
+					type: 'success'
+				});
+			});
 		});
 
 		handleUploads();
-
-		$('#settings-tab a').off('click').on('click', function (e) {
-			e.preventDefault();
-			$(this).tab('show');
-			return false;
-		});
 
 		$('button[data-action="email.test"]').off('click').on('click', function() {
 			socket.emit('admin.email.test', function(err) {
@@ -131,37 +118,50 @@ define('forum/admin/settings', ['uploader', 'sounds'], function(uploader, sounds
 		socket.emit('admin.config.remove', key);
 	};
 
-	function saveField(field, callback) {
-		field = $(field);
-		var key = field.attr('data-field'),
-			value, inputType;
+	function saveFields(fields, callback) {
+		var data = {};
 
-		if (field.is('input')) {
-			inputType = field.attr('type');
-			switch (inputType) {
-			case 'text':
-			case 'password':
-			case 'textarea':
-			case 'number':
+		fields.each(function() {
+			var field = $(this);
+			var key = field.attr('data-field'),
+				value, inputType;
+
+			if (field.is('input')) {
+				inputType = field.attr('type');
+				switch (inputType) {
+				case 'text':
+				case 'password':
+				case 'hidden':
+				case 'textarea':
+				case 'number':
+					value = field.val();
+					break;
+
+				case 'checkbox':
+					value = field.prop('checked') ? '1' : '0';
+					break;
+				}
+			} else if (field.is('textarea') || field.is('select')) {
 				value = field.val();
-				break;
-
-			case 'checkbox':
-				value = field.prop('checked') ? '1' : '0';
-				break;
 			}
-		} else if (field.is('textarea') || field.is('select')) {
-			value = field.val();
-		}
 
-		socket.emit('admin.config.set', {
-			key: key,
-			value: value
-		}, function(err) {
-			if(!err && app.config[key] !== undefined) {
-				app.config[key] = value;
+			data[key] = value;
+		});
+
+		socket.emit('admin.config.setMultiple', data, function(err) {
+			if (err) {
+				return callback(err);
 			}
-			callback(err);
+
+			if (app.config) {
+				for(var field in data) {
+					if (data.hasOwnProperty(field)) {
+						app.config[field] = data[field];
+					}
+				}
+			}
+
+			callback();
 		});
 	}
 
