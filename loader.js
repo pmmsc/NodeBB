@@ -6,10 +6,14 @@ var	nconf = require('nconf'),
 	cluster = require('cluster'),
 	async = require('async'),
 	logrotate = require('logrotate-stream'),
+
+	pkg = require('./package.json'),
+
 	pidFilePath = __dirname + '/pidfile',
 	output = logrotate({ file: __dirname + '/logs/output.log', size: '1m', keep: 3, compress: true }),
 	silent = process.env.NODE_ENV !== 'development' ? true : false,
-	numCPUs,
+	numProcs,
+
 	Loader = {
 		timesStarted: 0,
 		shutdown_queue: [],
@@ -23,11 +27,12 @@ var	nconf = require('nconf'),
 		}
 	};
 
-Loader.init = function() {
+Loader.init = function(callback) {
 	cluster.setupMaster({
 		exec: "app.js",
 		silent: silent
 	});
+	Loader.primaryWorker = 1;
 
 	if (silent) {
 		console.log = function(value) {
@@ -35,9 +40,25 @@ Loader.init = function() {
 		};
 	}
 
+	process.on('SIGHUP', Loader.restart);
+	callback();
+};
+
+Loader.displayStartupMessages = function(callback) {
+	console.log('NodeBB v' + pkg.version + ' Copyright (C) 2013-2014 NodeBB Inc.');
+	console.log('This program comes with ABSOLUTELY NO WARRANTY.');
+	console.log('This is free software, and you are welcome to redistribute it under certain conditions.');
+	console.log('For the full license, please visit: http://www.gnu.org/copyleft/gpl.html');
+	console.log('');
+	callback();
+};
+
+Loader.addClusterEvents = function(callback) {
 	cluster.on('fork', function(worker) {
 		worker.on('message', function(message) {
 			if (message && typeof message === 'object' && message.action) {
+				var otherWorkers;
+
 				switch (message.action) {
 					case 'ready':
 						if (Loader.js.cache) {
@@ -55,8 +76,6 @@ Loader.init = function() {
 								acpCache: Loader.css.acpCache
 							});
 						}
-
-						worker.send('bind');
 
 						// Kill an instance in the shutdown queue
 						var workerToKill = Loader.shutdown_queue.pop();
@@ -78,9 +97,10 @@ Loader.init = function() {
 						Loader.js.cache = message.cache;
 						Loader.js.map = message.map;
 
-						var otherWorkers = Object.keys(cluster.workers).filter(function(worker_id) {
-								return parseInt(worker_id, 10) !== parseInt(worker.id, 10);
-							});
+						otherWorkers = Object.keys(cluster.workers).filter(function(worker_id) {
+							return parseInt(worker_id, 10) !== parseInt(worker.id, 10);
+						});
+
 						otherWorkers.forEach(function(worker_id) {
 							cluster.workers[worker_id].send({
 								action: 'js-propagate',
@@ -93,9 +113,10 @@ Loader.init = function() {
 						Loader.css.cache = message.cache;
 						Loader.css.acpCache = message.acpCache;
 
-						var otherWorkers = Object.keys(cluster.workers).filter(function(worker_id) {
-								return parseInt(worker_id, 10) !== parseInt(worker.id, 10);
-							});
+						otherWorkers = Object.keys(cluster.workers).filter(function(worker_id) {
+							return parseInt(worker_id, 10) !== parseInt(worker.id, 10);
+						});
+
 						otherWorkers.forEach(function(worker_id) {
 							cluster.workers[worker_id].send({
 								action: 'css-propagate',
@@ -112,7 +133,7 @@ Loader.init = function() {
 					case 'user:connect':
 					case 'user:disconnect':
 					case 'config:update':
-						notifyWorkers(message);
+						Loader.notifyWorkers(message);
 					break;
 				}
 			}
@@ -123,15 +144,9 @@ Loader.init = function() {
 		console.log('[cluster] Child Process (' + worker.process.pid + ') listening for connections.');
 	});
 
-	function notifyWorkers(msg) {
-		Object.keys(cluster.workers).forEach(function(id) {
-			cluster.workers[id].send(msg);
-		});
-	}
-
 	cluster.on('exit', function(worker, code, signal) {
 		if (code !== 0) {
-			if (Loader.timesStarted < numCPUs*3) {
+			if (Loader.timesStarted < numProcs*3) {
 				Loader.timesStarted++;
 				if (Loader.crashTimer) {
 					clearTimeout(Loader.crashTimer);
@@ -140,14 +155,14 @@ Loader.init = function() {
 					Loader.timesStarted = 0;
 				});
 			} else {
-				console.log(numCPUs*3 + ' restarts in 10 seconds, most likely an error on startup. Halting.');
+				console.log(numProcs*3 + ' restarts in 10 seconds, most likely an error on startup. Halting.');
 				process.exit();
 			}
 		}
 
 		console.log('[cluster] Child Process (' + worker.process.pid + ') has exited (code: ' + code + ')');
 		if (!worker.suicide) {
-			console.log('[cluster] Spinning up another process...')
+			console.log('[cluster] Spinning up another process...');
 
 			var wasPrimary = parseInt(worker.id, 10) === Loader.primaryWorker;
 			cluster.fork({
@@ -156,17 +171,16 @@ Loader.init = function() {
 		}
 	});
 
-	process.on('SIGHUP', Loader.restart);
+	callback();
+}
 
-	Loader.start();
-};
+Loader.start = function(callback) {
+	var output = logrotate({ file: __dirname + '/logs/output.log', size: '1m', keep: 3, compress: true }),
+		worker;
 
-Loader.start = function() {
-	var worker;
+	console.log('Clustering enabled: Spinning up ' + numProcs + ' process(es).\n');
 
-	Loader.primaryWorker = 1;
-
-	for(var x=0;x<numCPUs;x++) {
+	for(var x=0;x<numProcs;x++) {
 		// Only the first worker sets up templates/sounds/jobs/etc
 		worker = cluster.fork({
 			cluster_setup: x === 0,
@@ -178,7 +192,9 @@ Loader.start = function() {
 			worker.process.stdout.pipe(output);
 		}
 	}
-}
+
+	if (callback) callback();
+};
 
 Loader.restart = function(callback) {
 	// Slate existing workers for termination -- welcome to death row.
@@ -194,15 +210,19 @@ Loader.reload = function() {
 	});
 };
 
-
+Loader.notifyWorkers = function (msg) {
+	Object.keys(cluster.workers).forEach(function(id) {
+		cluster.workers[id].send(msg);
+	});
+}
 
 
 nconf.argv().file({
 	file: path.join(__dirname, '/config.json')
 });
 
-numCPUs = nconf.get('cluster') || 1;
-numCPUs = (numCPUs === true) ? require('os').cpus().length : numCPUs;
+numProcs = nconf.get('cluster') || 1;
+numProcs = (numProcs === true) ? require('os').cpus().length : numProcs;
 
 if (nconf.get('daemon') !== false) {
 	if (fs.existsSync(pidFilePath)) {
@@ -220,4 +240,13 @@ if (nconf.get('daemon') !== false) {
 	fs.writeFile(__dirname + '/pidfile', process.pid);
 }
 
-Loader.init();
+async.series([
+	Loader.init,
+	Loader.displayStartupMessages,
+	Loader.addClusterEvents,
+	Loader.start
+], function(err) {
+	if (err) {
+		console.log('[loader] Error during startup: ' + err.message);
+	}
+});

@@ -35,7 +35,7 @@ $(document).ready(function() {
 				} else if (data.status === 401) {
 					app.alertError('[[global:please_log_in]]');
 					return ajaxify.go('login');
-				} else if (data.statuc === 403) {
+				} else if (data.status === 403) {
 					app.alertError('[[error:no-privileges]]');
 				} else if (data.status === 302) {
 					return ajaxify.go(data.responseJSON.slice(1), callback, quiet);
@@ -145,7 +145,9 @@ $(document).ready(function() {
 		};
 
 		ajaxify.loadScript = function(tpl_url, callback) {
-			require(['forum/' + tpl_url], function(script) {
+			var location = !app.inAdmin ? 'forum/' : '';
+
+			require([location + tpl_url], function(script) {
 				if (script && script.init) {
 					script.init();
 				}
@@ -275,7 +277,7 @@ $(document).ready(function() {
 				}
 
 				if ((!e.ctrlKey && !e.shiftKey && !e.metaKey) && e.which === 1) {
-					if (this.host === window.location.host) {
+					if (this.host === '' || this.host === window.location.host) {
 						// Internal link
 						var url = this.href.replace(rootUrl + '/', '');
 
