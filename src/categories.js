@@ -328,6 +328,20 @@ var db = require('./database'),
 		});
 	};
 
+    Categories.getAllCategoriesData = function(callback) {
+        db.getSortedSetRange('categories:cid', 0, -1, function(err, cids) {
+            if (err) {
+                return callback(err);
+            }
+
+            if (!Array.isArray(cids) || !cids.length) {
+                return callback(null, []);
+            }
+
+            Categories.getCategoriesData(cids, callback);
+        });
+    };
+
 	Categories.getCategoryField = function(cid, field, callback) {
 		db.getObjectField('category:' + cid, field, callback);
 	};

@@ -106,12 +106,39 @@ function generateForCategory(req, res, next) {
 			title: categoryData.name,
 			description: categoryData.description,
 			feed_url: '/category/' + cid + '.rss',
-			site_url: '/category/' + categoryData.cid,
+			site_url: '/category/' + categoryData.cid
 		}, categoryData.topics);
 
 		sendFeed(feed, res);
 	});
 }
+
+function generateForCategoriesData(req, res, next) {
+    var cid = req.params.category_id;
+    var uid = req.user ? req.user.uid : 0;
+    categories.getAllCategoriesData(function (err, categoriesData) {
+        if (err) {
+            return next(err);
+        }
+
+        var	feed = new rss({
+            title: 'All categories data',
+            description: 'All categories data'
+        });
+
+        categoriesData.forEach(function(categoryData) {
+            feed.item({
+                title: categoryData.name,
+                description: categoryData.description,
+                url: nconf.get('url') + categoryData.backgroundImage,
+                author: '' + !categoryData.disabled
+            });
+        });
+
+        sendFeed(feed, res);
+    });
+}
+
 
 function generateForRecent(req, res, next) {
 	generateForTopics({
@@ -255,6 +282,7 @@ function sendFeed(feed, res) {
 
 module.exports = function(app, middleware, controllers){
 	app.get('/topic/:topic_id.rss', hasTopicPrivileges, disabledRSS, generateForTopic);
+    app.get('/category.rss', disabledRSS, generateForCategoriesData);
 	app.get('/category/:category_id.rss', hasCategoryPrivileges, disabledRSS, generateForCategory);
 	app.get('/recent.rss', disabledRSS, generateForRecent);
 	app.get('/popular.rss', disabledRSS, generateForPopular);
