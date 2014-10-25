@@ -39,7 +39,7 @@
     "nodebb-plugin-markdown": "^0.7.0",
     "nodebb-plugin-mentions": "~0.6.0",
     "nodebb-plugin-soundpack-default": "~0.1.1",
-    "nodebb-theme-lavender": "~0.1.0",
+    "nodebb-theme-aymanbu": "~0.0.2",
     "nodebb-theme-vanilla": "~0.1.0",
     "nodebb-widget-essentials": "~0.1.1",
     "npm": "^2.1.4",
