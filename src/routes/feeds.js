@@ -113,6 +113,28 @@ function generateForCategory(req, res, next) {
 	});
 }
 
+function generateForTagsData(req, res, next) {
+    topics.getTags(0, 99, function(err, tags) {
+        if (err) {
+            return next(err);
+        }
+
+        var	feed = new rss({
+            title: 'All tags data',
+            description: 'All tags data'
+        });
+
+        tags.forEach(function(tagData) {
+            feed.item({
+                title: tagData.value,
+                description: tagData.score
+            });
+        });
+
+        sendFeed(feed, res);
+    });
+}
+
 function generateForCategoriesData(req, res, next) {
     var cid = req.params.category_id;
     var uid = req.user ? req.user.uid : 0;
@@ -138,7 +160,6 @@ function generateForCategoriesData(req, res, next) {
         sendFeed(feed, res);
     });
 }
-
 
 function generateForRecent(req, res, next) {
 	generateForTopics({
@@ -282,10 +303,13 @@ function sendFeed(feed, res) {
 
 module.exports = function(app, middleware, controllers){
 	app.get('/topic/:topic_id.rss', hasTopicPrivileges, disabledRSS, generateForTopic);
-    app.get('/category.rss', disabledRSS, generateForCategoriesData);
 	app.get('/category/:category_id.rss', hasCategoryPrivileges, disabledRSS, generateForCategory);
 	app.get('/recent.rss', disabledRSS, generateForRecent);
 	app.get('/popular.rss', disabledRSS, generateForPopular);
 	app.get('/recentposts.rss', disabledRSS, generateForRecentPosts);
 	app.get('/category/:category_id/recentposts.rss', hasCategoryPrivileges, disabledRSS, generateForCategoryRecentPosts);
+
+
+    app.get('/category.rss', disabledRSS, generateForCategoriesData);
+    app.get('/tags.rss', disabledRSS, generateForTagsData);
 };
