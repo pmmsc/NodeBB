@@ -272,7 +272,7 @@ function enableDefaultTheme(next) {
 		winston.info('Enabling default theme: Lavender');
 		meta.themes.set({
 			type: 'local',
-			id: 'nodebb-theme-lavender'
+			id: 'nodebb-theme-aymanbu'
 		}, next);
 	});
 }
