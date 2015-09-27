@@ -16,10 +16,10 @@ module.exports = function(privileges) {
 	privileges.categories.get = function(cid, uid, callback) {
 		async.parallel({
 			'topics:create': function(next) {
-				helpers.allowedTo('topics:create', uid, [cid], next);
+				helpers.isUserAllowedTo('topics:create', uid, [cid], next);
 			},
 			read: function(next) {
-				helpers.allowedTo('read', uid, [cid], next);
+				helpers.isUserAllowedTo('read', uid, [cid], next);
 			},
 			isAdministrator: function(next) {
 				user.isAdministrator(uid, next);
@@ -28,17 +28,17 @@ module.exports = function(privileges) {
 				user.isModerator(uid, cid, next);
 			}
 		}, function(err, results) {
-			if(err) {
+			if (err) {
 				return callback(err);
 			}
 
-			var editable = results.isAdministrator || results.isModerator;
+			var isAdminOrMod = results.isAdministrator || results.isModerator;
 
 			callback(null, {
-				'topics:create': results['topics:create'][0],
-				editable: editable,
-				view_deleted: editable,
-				read: results.read[0]
+				'topics:create': results['topics:create'][0] || isAdminOrMod,
+				editable: isAdminOrMod,
+				view_deleted: isAdminOrMod,
+				read: results.read[0] || isAdminOrMod
 			});
 		});
 	};
@@ -55,7 +55,7 @@ module.exports = function(privileges) {
 
 			helpers.some([
 				function(next) {
-					helpers.allowedTo(privilege, uid, [cid], function(err, results) {
+					helpers.isUserAllowedTo(privilege, uid, [cid], function(err, results) {
 						next(err, Array.isArray(results) && results.length ? results[0] : false);
 					});
 				},
@@ -69,7 +69,7 @@ module.exports = function(privileges) {
 		});
 	};
 
-	privileges.categories.filter = function(privilege, cids, uid, callback) {
+	privileges.categories.filterCids = function(privilege, cids, uid, callback) {
 		if (!cids.length) {
 			return callback(null, []);
 		}
@@ -80,7 +80,7 @@ module.exports = function(privileges) {
 
 		async.parallel({
 			allowedTo: function(next) {
-				helpers.allowedTo(privilege, uid, cids, next);
+				helpers.isUserAllowedTo(privilege, uid, cids, next);
 			},
 			isModerators: function(next) {
 				user.isModerator(uid, cids, next);
@@ -101,6 +101,37 @@ module.exports = function(privileges) {
 				return results.allowedTo[index] || results.isModerators[index];
 			});
 			callback(null, cids);
+		});
+	};
+
+	privileges.categories.filterUids = function(privilege, cid, uids, callback) {
+		if (!uids.length) {
+			return callback(null, []);
+		}
+
+		uids = uids.filter(function(uid, index, array) {
+			return array.indexOf(uid) === index;
+		});
+
+		async.parallel({
+			allowedTo: function(next) {
+				helpers.isUsersAllowedTo(privilege, uids, cid, next);
+			},
+			isModerators: function(next) {
+				user.isModerator(uids, cid, next);
+			},
+			isAdmin: function(next) {
+				user.isAdministrator(uids, next);
+			}
+		}, function(err, results) {
+			if (err) {
+				return callback(err);
+			}
+
+			uids = uids.filter(function(uid, index) {
+				return results.allowedTo[index] || results.isModerators[index] || results.isAdmin[index];
+			});
+			callback(null, uids);
 		});
 	};
 

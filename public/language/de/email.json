@@ -9,12 +9,15 @@
     "reset.text1": "Wir haben eine Anfrage auf Zurücksetzung deines Passworts erhalten, wahrscheinlich, weil du es vergessen hast. Falls dies nicht der Fall ist, ignoriere bitte diese E-Mail.",
     "reset.text2": "Klicke bitte auf den folgenden Link, um mit der Zurücksetzung deines Passworts fortzufahren:",
     "reset.cta": "Klicke hier, um dein Passwort zurückzusetzen",
-    "digest.notifications": "Du hast einige ungelesene Benachrichtigungen vom %1:",
+    "digest.notifications": "You have unread notifications from %1:",
     "digest.latest_topics": "Aktuellste Themen vom %1",
     "digest.cta": "Klicke hier, um %1 zu besuchen",
     "digest.unsub.info": "Diese Zusammenfassung wurde dir aufgrund deiner Abonnement-Einstellungen gesendet.",
-    "digest.unsub.cta": "Klicke hier, um diese Einstellungen zu ändern",
     "digest.daily.no_topics": "Es gab heute keine aktiven Themen",
+    "notif.chat.subject": "Neue Chatnachricht von %1 erhalten",
+    "notif.chat.cta": "Klicke hier, um die Unterhaltung fortzusetzen",
+    "notif.chat.unsub.info": "Diese Chat-Benachrichtigung wurde dir aufgrund deiner Abonnement-Einstellungen gesendet.",
     "test.text1": "Dies ist eine Test-E-Mail, um zu überprüfen, ob der E-Mailer deines NodeBB korrekt eingestellt wurde.",
+    "unsub.cta": "Klicke hier, um diese Einstellungen zu ändern.",
     "closing": "Danke!"
 }

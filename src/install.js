@@ -15,9 +15,6 @@ var async = require('async'),
 		},
 		"mongo": {
 			"dependencies": ["mongodb", "connect-mongo"]
-		},
-		"level": {
-			"dependencies": ["levelup", "leveldown", "connect-leveldb"]
 		}
 	};
 
@@ -29,7 +26,7 @@ questions.main = [
 	{
 		name: 'base_url',
 		description: 'URL used to access this NodeBB',
-		'default': nconf.get('base_url') || 'http://localhost:4567',
+		'default': nconf.get('base_url') ? (nconf.get('base_url') + (nconf.get('use_port') ? ':' + nconf.get('port') : '')) : 'http://localhost:4567',
 		pattern: /^http(?:s)?:\/\//,
 		message: 'Base URL must begin with \'http://\' or \'https://\'',
 	},
@@ -161,8 +158,7 @@ function setupConfig(next) {
 		var	config = {},
 			redisQuestions = require('./database/redis').questions,
 			mongoQuestions = require('./database/mongo').questions,
-			levelQuestions = require('./database/level').questions,
-			question, x, numQ, allQuestions = questions.main.concat(redisQuestions).concat(mongoQuestions.concat(levelQuestions));
+			question, x, numQ, allQuestions = questions.main.concat(redisQuestions).concat(mongoQuestions);
 
 		for(x=0,numQ=allQuestions.length;x<numQ;x++) {
 			question = allQuestions[x];
@@ -379,7 +375,7 @@ function createAdmin(callback) {
 function createCategories(next) {
 	var Categories = require('./categories');
 
-	Categories.getAllCategories(function (err, categoryData) {
+	Categories.getAllCategories(0, function (err, categoryData) {
 		if (err) {
 			return next(err);
 		}
@@ -402,6 +398,24 @@ function createCategories(next) {
 	});
 }
 
+function createWelcomePost(next) {
+	var db = require('./database'),
+		Topics = require('./topics');
+
+	db.sortedSetCard('topics:tid', function(err, numTopics) {
+		if (numTopics === 0) {
+			Topics.post({
+				uid: 1,
+				cid: 2,
+				title: 'Welcome to your NodeBB!',
+				content: '# Welcome to your brand new NodeBB forum!\n\nThis is what a topic and post looks like. As an administator, you can edit the post\'s title and content.\n\nTo customise your forum, go to the [Administrator Control Panel](../../admin). You can modify all aspects of your forum there, including installation of third-party plugins.\n\n## Additional Resources\n\n* [NodeBB Documentation](https://docs.nodebb.org)\n* [Community Support Forum](https://community.nodebb.org)\n* [Project repository](https://github.com/nodebb/nodebb)'
+			}, next);
+		} else {
+			next();
+		}
+	});
+}
+
 function enableDefaultPlugins(next) {
 	var Plugins = require('./plugins');
 
@@ -413,22 +427,12 @@ function enableDefaultPlugins(next) {
 		'nodebb-widget-essentials',
 		'nodebb-plugin-soundpack-default'
 	];
-
-	async.each(defaultEnabled, function (pluginId, next) {
-		Plugins.isActive(pluginId, function (err, active) {
-			if (!active) {
-				Plugins.toggleActive(pluginId, function () {
-					next();
-				});
-			} else {
-				next();
-			}
-		});
-	}, next);
+	var	db = require('./database');
+	db.setAdd('plugins:active', defaultEnabled, next);
 }
 
 function setCopyrightWidget(next) {
-	var	db = require('./database.js');
+	var	db = require('./database');
 
 	db.init(function(err) {
 		if (!err) {
@@ -438,7 +442,7 @@ function setCopyrightWidget(next) {
 }
 
 install.setup = function (callback) {
-	async.series([checkSetupFlag, checkCIFlag, setupConfig, setupDefaultConfigs, enableDefaultTheme, createAdministrator, createCategories, enableDefaultPlugins, setCopyrightWidget,
+	async.series([checkSetupFlag, checkCIFlag, setupConfig, setupDefaultConfigs, enableDefaultTheme, createAdministrator, createCategories, createWelcomePost, enableDefaultPlugins, setCopyrightWidget,
 		function (next) {
 			require('./upgrade').upgrade(next);
 		}

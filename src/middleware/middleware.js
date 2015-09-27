@@ -1,7 +1,9 @@
 "use strict";
 
 var app,
-	middleware = {},
+	middleware = {
+		admin: {}
+	},
 	async = require('async'),
 	path = require('path'),
 	winston = require('winston'),
@@ -15,6 +17,8 @@ var app,
 	categories = require('./../categories'),
 	topics = require('./../topics'),
 	messaging = require('../messaging'),
+	ensureLoggedIn = require('connect-ensure-login'),
+	csrf = require('csurf'),
 
 	controllers = {
 		api: require('./../controllers/api')
@@ -23,7 +27,7 @@ var app,
 middleware.authenticate = function(req, res, next) {
 	if(!req.user) {
 		if (res.locals.isAPI) {
-			return res.json(403, 'not-allowed');
+			return res.status(403).json('not-allowed');
 		} else {
 			return res.redirect(nconf.get('url') + '/403');
 		}
@@ -32,25 +36,62 @@ middleware.authenticate = function(req, res, next) {
 	}
 };
 
+middleware.applyCSRF = csrf();
+
+middleware.ensureLoggedIn = ensureLoggedIn.ensureLoggedIn();
+
 middleware.updateLastOnlineTime = function(req, res, next) {
 	if(req.user) {
 		user.updateLastOnlineTime(req.user.uid);
 	}
 
-	db.sortedSetAdd('ip:recent', Date.now(), req.ip || 'Unknown');
+	db.sortedSetScore('ip:recent', req.ip, function(err, score) {
+		if (err) {
+			return;
+		}
+		var today = new Date();
+		today.setHours(today.getHours(), 0, 0, 0);
+		if (!score) {
+			db.incrObjectField('global', 'uniqueIPCount');
+		}
+		if (!score || score < today.getTime()) {
+			db.sortedSetIncrBy('analytics:uniquevisitors', 1, today.getTime());
+			db.sortedSetAdd('ip:recent', Date.now(), req.ip || 'Unknown');
+		}
+	});
 
 	next();
 };
 
+middleware.incrementPageViews = function(req, res, next) {
+	var today = new Date();
+	today.setHours(today.getHours(), 0, 0, 0);
+
+	db.sortedSetIncrBy('analytics:pageviews', 1, today.getTime());
+	next();
+};
+
 middleware.redirectToAccountIfLoggedIn = function(req, res, next) {
-	if (req.user) {
-		user.getUserField(req.user.uid, 'userslug', function (err, userslug) {
-			if (res.locals.isAPI) {
-				return res.json(302, '/user/' + userslug);
-			} else {
-				res.redirect('/user/' + userslug);
-			}
-		});
+	if (!req.user) {
+		return next();
+	}
+	user.getUserField(req.user.uid, 'userslug', function (err, userslug) {
+		if (err) {
+			return next(err);
+		}
+
+		if (res.locals.isAPI) {
+			res.status(302).json('/user/' + userslug);
+		} else {
+			res.redirect('/user/' + userslug);
+		}
+	});
+};
+
+middleware.redirectToLoginIfGuest = function(req, res, next) {
+	if (!req.user || parseInt(req.user.uid, 10) === 0) {
+		req.session.returnTo = req.url;
+		return res.redirect('/login');
 	} else {
 		next();
 	}
@@ -62,8 +103,14 @@ middleware.addSlug = function(req, res, next) {
 			if (err || !slug || slug === id + '/') {
 				return next(err);
 			}
+
 			var url = name + encodeURI(slug);
-			res.locals.isAPI ? res.json(302, url) : res.redirect(url);
+
+			if (res.locals.isAPI) {
+				res.status(302).json(url);
+			} else {
+				res.redirect(url);
+			}
 		});
 	}
 
@@ -80,27 +127,8 @@ middleware.addSlug = function(req, res, next) {
 	next();
 };
 
-middleware.checkPostIndex = function(req, res, next) {
-	topics.getPostCount(req.params.topic_id, function(err, postCount) {
-		if (err) {
-			return next(err);
-		}
-		var postIndex = parseInt(req.params.post_index, 10);
-		postCount = parseInt(postCount, 10) + 1;
-		var url = '';
-		if (postIndex > postCount) {
-			url = '/topic/' + req.params.topic_id + '/' + req.params.slug + '/' + postCount;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		} else if (postIndex < 1) {
-			url = '/topic/' + req.params.topic_id + '/' + req.params.slug;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		}
-		next();
-	});
-};
-
 middleware.checkTopicIndex = function(req, res, next) {
-	db.sortedSetCard('categories:' + req.params.category_id + ':tid', function(err, topicCount) {
+	categories.getCategoryField(req.params.category_id, 'topic_count', function(err, topicCount) {
 		if (err) {
 			return next(err);
 		}
@@ -110,10 +138,10 @@ middleware.checkTopicIndex = function(req, res, next) {
 
 		if (topicIndex > topicCount) {
 			url = '/category/' + req.params.category_id + '/' + req.params.slug + '/' + topicCount;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
+			return res.locals.isAPI ? res.status(302).json(url) : res.redirect(url);
 		} else if (topicIndex < 1) {
 			url = '/category/' + req.params.category_id + '/' + req.params.slug;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
+			return res.locals.isAPI ? res.status(302).json(url) : res.redirect(url);
 		}
 		next();
 	});
@@ -137,9 +165,10 @@ middleware.checkGlobalPrivacySettings = function(req, res, next) {
 
 	if (!callerUID && !!parseInt(meta.config.privateUserInfo, 10)) {
 		if (res.locals.isAPI) {
-			return res.json(403, 'not-allowed');
+			return res.status(403).json('not-allowed');
 		} else {
-			return res.redirect('login?next=' + req.url);
+			req.session.returnTo = req.url;
+			return res.redirect('/login');
 		}
 	}
 
@@ -151,7 +180,8 @@ middleware.checkAccountPermissions = function(req, res, next) {
 	var callerUID = req.user ? parseInt(req.user.uid, 10) : 0;
 
 	if (callerUID === 0) {
-		return res.redirect('/login?next=' + req.url);
+		req.session.returnTo = req.url;
+		return res.redirect('/login');
 	}
 
 	user.getUidByUserslug(req.params.userslug, function (err, uid) {
@@ -160,7 +190,7 @@ middleware.checkAccountPermissions = function(req, res, next) {
 		}
 
 		if (!uid) {
-			return res.locals.isAPI ? res.json(404, 'not-found') : res.redirect(nconf.get('relative_path') + '/404');
+			return res.locals.isAPI ? res.status(404).json('not-found') : res.redirect(nconf.get('relative_path') + '/404');
 		}
 
 		if (parseInt(uid, 10) === callerUID) {
@@ -176,7 +206,11 @@ middleware.checkAccountPermissions = function(req, res, next) {
 				return next();
 			}
 
-			res.locals.isAPI ? res.json(403, 'not-allowed') : res.redirect(nconf.get('relative_path') + '/403');
+			if (res.locals.isAPI) {
+				res.status(403).json('not-allowed');
+			} else {
+				res.redirect(nconf.get('relative_path') + '/403');
+			}
 		});
 	});
 };
@@ -246,7 +280,7 @@ middleware.renderHeader = function(req, res, callback) {
 				'cache-buster': meta.config['cache-buster'] ? 'v=' + meta.config['cache-buster'] : '',
 				'brand:logo': meta.config['brand:logo'] || '',
 				'brand:logo:display': meta.config['brand:logo']?'':'hide',
-				csrf: res.locals.csrf_token,
+				csrf: req.csrfToken ? req.csrfToken() : undefined,
 				navigation: custom_header.navigation,
 				allowRegistration: meta.config.allowRegistration === undefined || parseInt(meta.config.allowRegistration, 10) === 1,
 				searchEnabled: plugins.hasListeners('filter:search.query')
@@ -295,13 +329,17 @@ middleware.renderHeader = function(req, res, callback) {
 				var less = require('less');
 				var parser = new (less.Parser)();
 
+				if (!meta.config.customCSS) {
+					return next(null, '');
+				}
+
 				parser.parse(meta.config.customCSS, function(err, tree) {
-					if (!err) {
-						next(err, tree ? tree.toCSS({cleancss: true}) : '');
-					} else {
+					if (err) {
 						winston.error('[less] Could not convert custom LESS to CSS! Please check your syntax.');
-						next(undefined, '');
+						return next(null, '');
 					}
+
+					next(null, tree ? tree.toCSS({cleancss: true}) : '');
 				});
 			},
 			customJS: function(next) {
@@ -314,10 +352,10 @@ middleware.renderHeader = function(req, res, callback) {
 						if (err) {
 							return next(err);
 						}
-						meta.title.build(req.url.slice(1), settings.language, next);
+						meta.title.build(req.url.slice(1), settings.language, res.locals, next);
 					});
 				} else {
-					meta.title.build(req.url.slice(1), meta.config.defaultLang, next);
+					meta.title.build(req.url.slice(1), meta.config.defaultLang, res.locals, next);
 				}
 			},
 			isAdmin: function(next) {
@@ -325,7 +363,7 @@ middleware.renderHeader = function(req, res, callback) {
 			},
 			user: function(next) {
 				if (uid) {
-					user.getUserFields(uid, ['username', 'userslug', 'picture', 'status'], next);
+					user.getUserFields(uid, ['username', 'userslug', 'picture', 'status', 'banned'], next);
 				} else {
 					next();
 				}
@@ -335,11 +373,18 @@ middleware.renderHeader = function(req, res, callback) {
 				return callback(err);
 			}
 
+			if (results.user && parseInt(results.user.banned, 10) === 1) {
+				req.logout();
+				res.redirect('/');
+				return;
+			}
+
 			templateValues.browserTitle = results.title;
 			templateValues.isAdmin = results.isAdmin || false;
 			templateValues.user = results.user;
 			templateValues.customCSS = results.customCSS;
 			templateValues.customJS = results.customJS;
+			templateValues.maintenanceHeader = parseInt(meta.config.maintenanceMode, 10) === 1 && !results.isAdmin;
 
 			app.render('header', templateValues, callback);
 		});
@@ -379,6 +424,7 @@ middleware.processRender = function(req, res, next) {
 		}
 
 		render.call(self, template, options, function(err, str) {
+			// str = str + '<input type="hidden" ajaxify-data="' + encodeURIComponent(JSON.stringify(options)) + '" />';
 			str = (res.locals.postHeader ? res.locals.postHeader : '') + str + (res.locals.preFooter ? res.locals.preFooter : '');
 
 			if (res.locals.footer) {
@@ -391,7 +437,7 @@ middleware.processRender = function(req, res, next) {
 				middleware.renderHeader(req, res, function(err, template) {
 					str = template + str;
 
-					translator.translate(str, res.locals.config.defaultLang, function(translated) {
+					translator.translate(str, res.locals.config.userLang, function(translated) {
 						fn(err, translated);
 					});
 				});
@@ -424,6 +470,62 @@ middleware.addExpiresHeaders = function(req, res, next) {
 	}
 
 	next();
+};
+
+middleware.maintenanceMode = function(req, res, next) {
+	if (meta.config.maintenanceMode !== '1') {
+		return next();
+	}
+
+	var allowedRoutes = [
+			'/login',
+			'/stylesheet.css',
+			'/nodebb.min.js',
+			'/vendor/fontawesome/fonts/fontawesome-webfont.woff'
+		],
+		render = function() {
+			res.status(503);
+
+			if (!isApiRoute.test(req.url)) {
+				middleware.buildHeader(req, res, function() {
+					res.render('maintenance', {
+						site_title: meta.config.title || 'NodeBB',
+						message: meta.config.maintenanceModeMessage
+					});
+				});
+			} else {
+				translator.translate('[[pages:maintenance.text, ' + meta.config.title + ']]', meta.config.defaultLang || 'en_GB', function(translated) {
+					res.json({
+						error: translated
+					});
+				});
+			}
+		},
+		isAllowed = function(url) {
+			for(var x=0,numAllowed=allowedRoutes.length,route;x<numAllowed;x++) {
+				route = new RegExp(allowedRoutes[x]);
+				if (route.test(url)) {
+					return true;
+				}
+			}
+		},
+		isApiRoute = /^\/api/;
+
+	if (!isAllowed(req.url)) {
+		if (!req.user) {
+			return render();
+		} else {
+			user.isAdministrator(req.user.uid, function(err, isAdmin) {
+				if (!isAdmin) {
+					return render();
+				} else {
+					return next();
+				}
+			});
+		}
+	} else {
+		return next();
+	}
 };
 
 module.exports = function(webserver) {

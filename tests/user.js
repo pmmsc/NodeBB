@@ -1,5 +1,3 @@
-// this test currently needs to talk to the redis database.
-// get the redis config info from root directory's config.json:
 var winston = require('winston');
 
 process.on('uncaughtException', function (err) {
@@ -7,7 +5,7 @@ process.on('uncaughtException', function (err) {
 });
 
 var	assert = require('assert'),
-	db = require('../mocks/databasemock');
+	db = require('./mocks/databasemock');
 
 var User = require('../src/user');
 

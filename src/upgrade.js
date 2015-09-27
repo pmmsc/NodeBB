@@ -19,7 +19,7 @@ var db = require('./database'),
 	schemaDate, thisSchemaDate,
 
 	// IMPORTANT: REMEMBER TO UPDATE VALUE OF latestSchema
-	latestSchema = Date.UTC(2014, 6, 24);
+	latestSchema = Date.UTC(2014, 9, 22);
 
 Upgrade.check = function(callback) {
 	db.get('schemaDate', function(err, value) {
@@ -75,7 +75,7 @@ Upgrade.upgrade = function(callback) {
 					{
 						"widget": "html",
 						"data": {
-							"html": Meta.config['motd'] ||  "Welcome to NodeBB, if you are an administrator of this forum visit the <a target='_blank' href='/admin/themes'>Themes</a> ACP to modify and add widgets."
+							"html": Meta.config.motd ||  "Welcome to NodeBB, if you are an administrator of this forum visit the <a target='_blank' href='/admin/themes'>Themes</a> ACP to modify and add widgets."
 						}
 					}
 				]), function(err) {
@@ -171,7 +171,7 @@ Upgrade.upgrade = function(callback) {
 					{
 						"widget": "html",
 						"data": {
-							"html": Meta.config['motd'] || "Welcome to NodeBB, if you are an administrator of this forum visit the <a target='_blank' href='/admin/themes'>Themes</a> ACP to modify and add widgets.",
+							"html": Meta.config.motd || "Welcome to NodeBB, if you are an administrator of this forum visit the <a target='_blank' href='/admin/themes'>Themes</a> ACP to modify and add widgets.",
 							"container": container,
 							"title": "MOTD"
 						}
@@ -354,9 +354,11 @@ Upgrade.upgrade = function(callback) {
 						gid;
 
 					for(var groupName in mapping) {
-						gid = mapping[groupName];
-						if (mapping.hasOwnProperty(groupName) && !reverseMapping.hasOwnProperty(gid)) {
-							reverseMapping[parseInt(gid, 10)] = groupName;
+						if (mapping.hasOwnProperty(groupName)) {
+							gid = mapping[groupName];
+							if (mapping.hasOwnProperty(groupName) && !reverseMapping.hasOwnProperty(gid)) {
+								reverseMapping[parseInt(gid, 10)] = groupName;
+							}
 						}
 					}
 
@@ -961,6 +963,186 @@ Upgrade.upgrade = function(callback) {
 				});
 			} else {
 				winston.info('[2014/7/24] Upgrading chats to sorted set - skipped');
+				next();
+			}
+		},
+		function(next) {
+			thisSchemaDate = Date.UTC(2014, 8, 8);
+
+			if (schemaDate < thisSchemaDate) {
+				winston.info('[2014/9/8] Deleting old notifications...');
+
+				async.parallel({
+					uids: function(next) {
+						db.getSortedSetRange('users:joindate', 0, -1, next);
+					},
+					nids: function(next) {
+						db.getSetMembers('notifications', next);
+					}
+				}, function(err, results) {
+					if (err) {
+						return next(err);
+					}
+					var uidKeys = results.uids.map(function(uid) {
+						return 'uid:' + uid + ':notifications:uniqueId:nid';
+					});
+
+					var nidKeys = results.nids.filter(Boolean).map(function(nid) {
+						return 'notifications:' + nid;
+					});
+
+					async.series([
+						function(next) {
+							db.deleteAll(nidKeys, next);
+						},
+						function(next) {
+							db.deleteAll(uidKeys, next);
+						},
+						function(next) {
+							db.delete('notifications', next);
+						}
+					], function(err, results) {
+						if (err) {
+							winston.error('[2014/9/8] Error encountered while deleting notifications');
+							return next(err);
+						}
+
+						winston.info('[2014/9/8] Deleted old notifications');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2014/9/8] Deleting old notifications skipped');
+				next();
+			}
+		},
+		function(next) {
+			thisSchemaDate = Date.UTC(2014, 8, 27);
+			if (schemaDate < thisSchemaDate) {
+				winston.info('[2014/9/27] Deleting tid:<tid>:read_by_uid...');
+
+				db.getSortedSetRange('topics:tid', 0, -1, function(err, tids) {
+					if (err) {
+						return next(err);
+					}
+					tids = tids.filter(Boolean);
+					var readKeys = tids.map(function(tid) {
+						return 'tid:' + tid + ':read_by_uid';
+					});
+
+					db.deleteAll(readKeys, function(err, results) {
+						if (err) {
+							winston.error('[2014/9/27] Error encountered while deleting tid:<tid>:read_by_uid');
+							return next(err);
+						}
+
+						winston.info('[2014/9/27] Deleted tid:<tid>:read_by_uid');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2014/9/27] Deleting tid:<tid>:read_by_uid skipped');
+				next();
+			}
+		},
+		function(next) {
+			thisSchemaDate = Date.UTC(2014, 9, 7);
+			if (schemaDate < thisSchemaDate) {
+				winston.info('[2014/10/7] Banned users sorted set');
+
+				db.getSortedSetRange('users:joindate', 0, -1, function(err, uids) {
+					if (err) {
+						return next(err);
+					}
+
+					var now = Date.now();
+
+					async.eachLimit(uids, 50, function(uid, next) {
+						User.getUserField(uid, 'banned', function(err, banned) {
+							if (err) {
+								return next(err);
+							}
+
+							if (parseInt(banned, 10) !== 1) {
+								return next();
+							}
+
+							db.sortedSetAdd('users:banned', now, uid, next);
+						});
+					}, function(err) {
+						if (err) {
+							winston.error('[2014/10/7] Error encountered while updating banned users sorted set');
+							return next(err);
+						}
+
+						winston.info('[2014/10/7] Banned users added to sorted set');
+						Upgrade.update(thisSchemaDate, next);
+					});
+				});
+			} else {
+				winston.info('[2014/10/7] Banned users sorted set skipped');
+				next();
+			}
+		},
+		function(next) {
+			function updateCategories(next) {
+				db.getSortedSetRange('categories:cid', 0, -1, function(err, cids) {
+					if (err) {
+						return next(err);
+					}
+
+					async.eachLimit(cids, 5, function(cid, next) {
+						db.sortedSetCard('categories:' + cid + ':tid', function(err, count) {
+							if (err) {
+								return next(err);
+							}
+							count = parseInt(count, 10) || 0;
+							db.setObjectField('category:' + cid, 'topic_count', count, next);
+						});
+					}, next);
+				});
+			}
+
+			function updateTopics(next) {
+				db.getSortedSetRange('topics:tid', 0, -1, function(err, tids) {
+					if (err) {
+						return next(err);
+					}
+
+					async.eachLimit(tids, 50, function(tid, next) {
+						db.sortedSetCard('tid:' + tid + ':posts', function(err, count) {
+							if (err) {
+								return next(err);
+							}
+							count = (parseInt(count, 10) || 0) + 1;
+							winston.info('updating tid ' + tid + ' count ' + count);
+							db.setObjectField('topic:' + tid, 'postcount', count, next);
+						});
+					}, next);
+				});
+			}
+
+			thisSchemaDate = Date.UTC(2014, 9, 22);
+			if (schemaDate < thisSchemaDate) {
+				winston.info('[2014/10/22] Topic post count migration');
+
+				async.series([
+					function(next) {
+						updateCategories(next);
+					},
+					function(next) {
+						updateTopics(next);
+					}
+				], function(err) {
+					if (err) {
+						winston.error('[2014/10/22] Error encountered while Topic post count migration');
+						return next(err);
+					}
+					winston.info('[2014/10/22] Topic post count migration done');
+					Upgrade.update(thisSchemaDate, next);
+				});
+			} else {
+				winston.info('[2014/10/22] Topic post count migration skipped');
 				next();
 			}
 		}

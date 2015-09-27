@@ -2,16 +2,19 @@
 
 var db = require('./database'),
 	async = require('async'),
+	nconf = require('nconf'),
 	winston = require('winston'),
 	user = require('./user'),
 	plugins = require('./plugins'),
 	meta = require('./meta'),
 	utils = require('../public/src/utils'),
 	notifications = require('./notifications'),
-	userNotifications = require('./user/notifications');
-
+	userNotifications = require('./user/notifications'),
+	websockets = require('./socket.io'),
+	emailer = require('./emailer');
 
 (function(Messaging) {
+	Messaging.notifyQueue = {};	// Only used to notify a user of a new chat message, see Messaging.notifyUser
 
 	function sortUids(fromuid, touid) {
 		return [fromuid, touid].sort();
@@ -45,7 +48,6 @@ var db = require('./database'),
 				}
 
 				async.parallel([
-					async.apply(addToRecent, fromuid, message),
 					async.apply(db.sortedSetAdd, 'messages:uid:' + uids[0] + ':to:' + uids[1], timestamp, mid),
 					async.apply(Messaging.updateChatTime, fromuid, touid),
 					async.apply(Messaging.updateChatTime, touid, fromuid),
@@ -75,20 +77,18 @@ var db = require('./database'),
 		});
 	};
 
-	function addToRecent(fromuid, message, callback) {
-		db.listPrepend('messages:recent:' + fromuid, message.content, function(err) {
-			if (err) {
-				return callback(err);
-			}
-
-			db.listTrim('messages:recent:' + fromuid, 0, 9, callback);
-		});
-	}
-
-	Messaging.getMessages = function(fromuid, touid, isNew, callback) {
+	Messaging.getMessages = function(fromuid, touid, since, isNew, callback) {
 		var uids = sortUids(fromuid, touid);
 
-		db.getSortedSetRevRange('messages:uid:' + uids[0] + ':to:' + uids[1], 0, (meta.config.chatMessagesToDisplay || 50) - 1, function(err, mids) {
+		var terms = {
+			day: 86400000,
+			week: 604800000,
+			month: 2592000000,
+			threemonths: 7776000000
+		};
+		since = terms[since] || terms.day;
+		var count = parseInt(meta.config.chatMessageInboxSize, 10) || 250;
+		db.getSortedSetRevRangeByScore('messages:uid:' + uids[0] + ':to:' + uids[1], 0, count, Infinity, Date.now() - since, function(err, mids) {
 			if (err) {
 				return callback(err);
 			}
@@ -102,8 +102,7 @@ var db = require('./database'),
 			getMessages(mids, fromuid, touid, isNew, callback);
 		});
 
-		// Mark any chat notifications pertaining to this chat as read
-		notifications.markReadByUniqueId(fromuid, 'chat_' + touid + '_' + fromuid, function(err) {
+		notifications.markRead('chat_' + touid + '_' + fromuid, fromuid, function(err) {
 			if (err) {
 				winston.error('[messaging] Could not mark notifications related to this chat as read: ' + err.message);
 			}
@@ -216,32 +215,41 @@ var db = require('./database'),
 	};
 
 	Messaging.getRecentChats = function(uid, start, end, callback) {
+		var websockets = require('./socket.io');
+
 		db.getSortedSetRevRange('uid:' + uid + ':chats', start, end, function(err, uids) {
-			if(err) {
+			if (err) {
 				return callback(err);
 			}
 
-			db.isSortedSetMembers('uid:' + uid + ':chats:unread', uids, function(err, unreadUids) {
+			async.parallel({
+				unread: function(next) {
+					db.isSortedSetMembers('uid:' + uid + ':chats:unread', uids, next);
+				},
+				users: function(next) {
+					user.getMultipleUserFields(uids, ['uid', 'username', 'picture', 'status'] , next);
+				}
+			}, function(err, results) {
 				if (err) {
 					return callback(err);
 				}
 
-				user.isOnline(uids, function(err, users) {
-					if (err) {
-						return callback(err);
-					}
-
-					users.forEach(function(user, index) {
-						if (user) {
-							user.unread = unreadUids[index];
-						}
-					});
-
-					users = users.filter(function(user) {
-						return !!user.uid;
-					});
-					callback(null, users);
+				results.users = results.users.filter(function(user) {
+					return user && parseInt(user.uid, 10);
 				});
+
+				if (!results.users.length) {
+					return callback(null, {users: [], nextStart: end + 1});
+				}
+
+				results.users.forEach(function(user, index) {
+					if (user) {
+						user.unread = results.unread[index];
+						user.status = websockets.isUserOnline(user.uid) ? user.status : 'offline';
+					}
+				});
+
+				callback(null, {users: results.users, nextStart: end + 1});
 			});
 		});
 	};
@@ -258,70 +266,54 @@ var db = require('./database'),
 		db.sortedSetAdd('uid:' + uid + ':chats:unread', Date.now(), toUid, callback);
 	};
 
-	/*
-	todo #1798 -- this utility method creates a room name given an array of uids.
-
-	Messaging.uidsToRoom = function(uids, callback) {
-		uid = parseInt(uid, 10);
-		if (typeof uid === 'number' && Array.isArray(roomUids)) {
-			var room = 'chat_';
-
-			room = room + roomUids.map(function(uid) {
-				return parseInt(uid, 10);
-			}).sort(function(a, b) {
-				return a-b;
-			}).join('_');
-
-			callback(null, room);
+	Messaging.notifyUser = function(fromuid, touid, messageObj) {
+		var queueObj = Messaging.notifyQueue[fromuid + ':' + touid];
+		if (queueObj) {
+			queueObj.message.content += '\n' + messageObj.content;
+			clearTimeout(queueObj.timeout);
 		} else {
-			callback(new Error('invalid-uid-or-participant-uids'));
+			queueObj = Messaging.notifyQueue[fromuid + ':' + touid] = {
+				message: messageObj
+			};
 		}
-	};*/
 
-	Messaging.verifySpammer = function(uid, callback) {
-		var messagesToCompare = 10;
-
-		db.getListRange('messages:recent:' + uid, 0, messagesToCompare - 1, function(err, msgs) {
-			var total = 0;
-
-			for (var i = 0, ii = msgs.length - 1; i < ii; ++i) {
-				total += areTooSimilar(msgs[i], msgs[i+1]) ? 1 : 0;
-			}
-
-			var isSpammer = total === messagesToCompare - 1;
-			if (isSpammer) {
-				db.delete('messages:recent:' + uid);
-			}
-
-			callback(err, isSpammer);
-		});
+		queueObj.timeout = setTimeout(function() {
+			sendNotifications(fromuid, touid, queueObj.message, function(err) {
+				if (!err) {
+					delete Messaging.notifyQueue[fromuid + ':' + touid];
+				}
+			});
+		}, 1000*60);	// wait 60s before sending
 	};
 
-	// modified from http://en.wikibooks.org/wiki/Algorithm_Implementation/Strings/Levenshtein_distance
-	function areTooSimilar(a, b) {
-		var matrix = [];
-
-		for(var i = 0; i <= b.length; i++){
-			matrix[i] = [i];
-		}
-
-		for(var j = 0; j <= a.length; j++){
-			matrix[0][j] = j;
-		}
-
-		for(i = 1; i <= b.length; i++){
-			for(j = 1; j <= a.length; j++){
-				if(b.charAt(i-1) === a.charAt(j-1)){
-					matrix[i][j] = matrix[i-1][j-1];
-				} else {
-					matrix[i][j] = Math.min(matrix[i-1][j-1] + 1,
-					Math.min(matrix[i][j-1] + 1,
-					matrix[i-1][j] + 1));
+	function sendNotifications(fromuid, touid, messageObj, callback) {
+		// todo #1798 -- this should check if the user is in room `chat_{uidA}_{uidB}` instead, see `Sockets.uidInRoom(uid, room);`
+		if (!websockets.isUserOnline(touid)) {
+			notifications.create({
+				bodyShort: '[[notifications:new_message_from, ' + messageObj.fromUser.username + ']]',
+				bodyLong: messageObj.content,
+				path: nconf.get('relative_path') + '/chats/' + utils.slugify(messageObj.fromUser.username),
+				nid: 'chat_' + fromuid + '_' + touid,
+				from: fromuid
+			}, function(err, notification) {
+				if (!err && notification) {
+					notifications.push(notification, [touid], callback);
 				}
-			}
-		}
+			});
 
-		return (matrix[b.length][a.length] / b.length < 0.1);
+			user.getSettings(messageObj.toUser.uid, function(err, settings) {
+				if (settings.sendChatNotifications && !parseInt(meta.config.disableEmailSubscriptions, 10)) {
+					emailer.send('notif_chat', touid, {
+						subject: '[[email:notif.chat.subject, ' + messageObj.fromUser.username + ']]',
+						username: messageObj.toUser.username,
+						summary: '[[notifications:new_message_from, ' + messageObj.fromUser.username + ']]',
+						message: messageObj,
+						site_title: meta.config.title || 'NodeBB',
+						url: nconf.get('url') + '/chats/' + utils.slugify(messageObj.fromUser.username)
+					});
+				}
+			});
+		}
 	}
 
 }(exports));
