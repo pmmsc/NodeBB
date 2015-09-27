@@ -8,11 +8,15 @@ var async = require('async'),
 module.exports = function(User) {
 
 	User.logIP = function(uid, ip) {
-		db.sortedSetAdd('uid:' + uid + ':ip', Date.now(), ip || 'Unknown');
+		var now = Date.now();
+		db.sortedSetAdd('uid:' + uid + ':ip', now, ip || 'Unknown');
+		if (ip) {
+			db.sortedSetAdd('ip:' + ip + ':uid', now, uid);
+		}
 	};
 
-	User.getIPs = function(uid, end, callback) {
-		db.getSortedSetRevRange('uid:' + uid + ':ip', 0, end, function(err, ips) {
+	User.getIPs = function(uid, stop, callback) {
+		db.getSortedSetRevRange('uid:' + uid + ':ip', 0, stop, function(err, ips) {
 			if(err) {
 				return callback(err);
 			}
@@ -28,10 +32,13 @@ module.exports = function(User) {
 
 		async.waterfall([
 			function(next) {
-				db.getObjectValues('username:uid', next);
+				db.getSortedSetRangeWithScores('username:uid', 0, -1, next);
 			},
-			function(uids, next) {
-				User.getMultipleUserFields(uids, ['uid', 'email', 'username'], next);
+			function(users, next) {
+				var uids = users.map(function(user) {
+					return user.score;
+				});
+				User.getUsersFields(uids, ['uid', 'email', 'username'], next);
 			},
 			function(usersData, next) {
 				usersData.forEach(function(user, index) {
@@ -46,11 +53,31 @@ module.exports = function(User) {
 	};
 
 	User.ban = function(uid, callback) {
-		User.setUserField(uid, 'banned', 1, callback);
+		User.setUserField(uid, 'banned', 1, function(err) {
+			if (err) {
+				return callback(err);
+			}
+			db.sortedSetAdd('users:banned', Date.now(), uid, callback);
+		});
 	};
 
 	User.unban = function(uid, callback) {
 		db.delete('uid:' + uid + ':flagged_by');
-		User.setUserField(uid, 'banned', 0, callback);
+		User.setUserField(uid, 'banned', 0, function(err) {
+			if (err) {
+				return callback(err);
+			}
+			db.sortedSetRemove('users:banned', uid, callback);
+		});
+	};
+
+	User.resetFlags = function(uids, callback) {
+		if (!Array.isArray(uids) || !uids.length) {
+			return callback();
+		}
+		var keys = uids.map(function(uid) {
+			return 'uid:' + uid + ':flagged_by';
+		});
+		db.deleteAll(keys, callback);
 	};
 };

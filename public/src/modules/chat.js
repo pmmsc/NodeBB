@@ -1,59 +1,24 @@
 "use strict";
-/* globals app, config, define, socket, translator, templates, utils, ajaxify */
+/* globals app, config, define, socket, templates, utils, ajaxify */
 
-define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar, S, sounds, Chats) {
+define('chat', ['components', 'taskbar', 'string', 'sounds', 'forum/chats', 'translator'], function(components, taskbar, S, sounds, Chats, translator) {
 
 	var module = {};
 	var newMessage = false;
 
 	module.prepareDOM = function() {
-		// Chats Dropdown
-		var	chatsToggleEl = $('#chat_dropdown'),
-			chatsListEl = $('#chat-list');
+		var	chatsToggleEl = components.get('chat/dropdown'),
+			chatsListEl = components.get('chat/list');
+
+		// Sync open chats between all user socket sessions
+		module.sync();
 
 		chatsToggleEl.on('click', function() {
 			if (chatsToggleEl.parent().hasClass('open')) {
 				return;
 			}
 
-			socket.emit('modules.chats.list', function(err, chats) {
-				if (err) {
-					return app.alertError(err.message);
-				}
-
-				var	userObj;
-
-				chatsListEl.empty();
-
-				if (!chats.length) {
-					translator.translate('[[modules:chat.no_active]]', function(str) {
-						$('<li />')
-							.addClass('no_active')
-							.html('<a href="#">' + str + '</a>')
-							.appendTo(chatsListEl);
-					});
-					return;
-				}
-
-				for(var x = 0; x<chats.length; ++x) {
-					userObj = chats[x];
-					$('<li class="' + (userObj.unread ? 'unread' : '') + '"/>')
-						.attr('data-uid', userObj.uid)
-						.html('<a href="javascript:app.openChat(\'' +
-							userObj.username +
-							'\', ' + userObj.uid +
-							');">'+
-							'<img src="' +	userObj.picture + '" title="' +	userObj.username +'" />' +
-							'<i class="fa fa-circle status ' + userObj.status + '"></i> ' +
-							userObj.username + '</a>')
-						.appendTo(chatsListEl);
-				}
-
-				var seeAll = '<li class="pagelink"><a href="' + config.relative_path + '/chats">[[modules:chat.see_all]]</a></li>';
-				translator.translate(seeAll, function(translated) {
-					$(translated).appendTo(chatsListEl);
-				});
-			});
+			module.loadChatsDropdown(chatsListEl);
 		});
 
 		socket.on('event:chats.receive', function(data) {
@@ -63,31 +28,40 @@ define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar,
 			}
 
 			var username = data.message.fromUser.username;
-			var isSelf = parseInt(data.message.fromUser.uid, 10) === parseInt(app.uid, 10);
+			var isSelf = parseInt(data.message.fromUser.uid, 10) === parseInt(app.user.uid, 10);
+			data.message.self = data.self;
 			if (isSelf) {
 				username = data.message.toUser.username;
 			}
-			newMessage = data.message.self === 0;
+			newMessage = data.self === 0;
 			if (module.modalExists(data.withUid)) {
 				var modal = module.getModal(data.withUid);
-				module.appendChatMessage(modal, data.message);
+
+				Chats.appendChatMessage(modal.find('.chat-content'), data.message);
 
 				if (modal.is(":visible")) {
-					module.bringModalToTop(modal);
-					checkOnlineStatus(modal);
 					taskbar.updateActive(modal.attr('UUID'));
-					Chats.scrollToBottom(modal.find('#chat-content'));
+					Chats.scrollToBottom(modal.find('.chat-content'));
 				} else {
-					module.toggleNew(modal.attr('UUID'), true);
+					module.toggleNew(modal.attr('UUID'), true, true);
 				}
 
 				if (!isSelf && (!modal.is(":visible") || !app.isFocused)) {
 					app.alternatingTitle('[[modules:chat.user_has_messaged_you, ' + username + ']]');
 					sounds.play('chat-incoming');
+
+					taskbar.push('chat', modal.attr('UUID'), {
+						title: username,
+						touid: data.message.fromUser.uid
+					});
 				}
 			} else {
-				module.createModal(username, data.withUid, function(modal) {
-					module.toggleNew(modal.attr('UUID'), true);
+				module.createModal({
+					username: username,
+					touid: data.withUid,
+					silent: true
+				}, function(modal) {
+					module.toggleNew(modal.attr('UUID'), true, true);
 					if (!isSelf) {
 						app.alternatingTitle('[[modules:chat.user_has_messaged_you, ' + username + ']]');
 						sounds.play('chat-incoming');
@@ -98,7 +72,7 @@ define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar,
 
 		socket.on('event:chats.userStartTyping', function(withUid) {
 			var modal = module.getModal(withUid);
-			var chatContent = modal.find('#chat-content');
+			var chatContent = modal.find('.chat-content');
 			if (!chatContent.length) {
 				return;
 			}
@@ -114,16 +88,106 @@ define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar,
 			var modal = module.getModal(withUid);
 			modal.find('.user-typing').addClass('hide');
 		});
+
+		socket.on('event:user_status_change', function(data) {
+			var modal = module.getModal(data.uid);
+			app.updateUserStatus(modal.find('[component="user/status"]'), data.status);
+		});
+
+		socket.on('query:chats.sync', function(data, callback) {
+			var chats = Array.prototype.map.call(taskbar.get('chat'), function(chatObj) {
+					return {
+						username: chatObj.options.title,
+						uid: chatObj.options.touid,
+						new: chatObj.element.hasClass('new')
+					};
+				});
+
+			callback(null, chats);
+		});
+
+		socket.on('event:chats.open', function(data) {
+			data.silent = true;
+			module.createModal(data);
+		});
+
+		socket.on('event:chats.close', function(uid) {
+			module.close(module.getModal(uid), true);
+		});
+
+		socket.on('event:chats.toggleNew', function(data) {
+			var uuid = module.getModal(data.uid).attr('UUID');
+			module.toggleNew(uuid, data.state, true);
+		});
+
+		$(window).on('action:taskbar.toggleNew', function(ev, uuid) {
+			var modal = $('.chat-modal[uuid="' + uuid + '"]'),
+				touid = modal.attr('touid');
+
+			socket.emit('modules.chats.toggleNew', {
+				uid: touid,
+				state: false
+			});
+		});
+	};
+
+	module.loadChatsDropdown = function(chatsListEl) {
+		var dropdownEl;
+
+		socket.emit('modules.chats.getRecentChats', {after: 0}, function(err, chats) {
+			if (err) {
+				return app.alertError(err.message);
+			}
+			chats = chats.users;
+
+			chatsListEl.empty();
+
+			if (!chats.length) {
+				translator.translate('[[modules:chat.no_active]]', function(str) {
+					$('<li />')
+						.addClass('no_active')
+						.html('<a href="#">' + str + '</a>')
+						.appendTo(chatsListEl);
+				});
+				return;
+			}
+
+			chats.forEach(function(userObj) {
+				dropdownEl = $('<li class="' + (userObj.unread ? 'unread' : '') + '"/>')
+					.attr('data-uid', userObj.uid)
+					.html('<a data-ajaxify="false">'+
+						'<img src="' +	userObj.picture + '" title="' +	userObj.username +'" />' +
+						'<i class="fa fa-circle status ' + userObj.status + '"></i> ' +
+						userObj.username + '</a>')
+					.appendTo(chatsListEl);
+
+
+				dropdownEl.click(function() {
+					if (!ajaxify.currentPage.match(/^chats\//)) {
+						app.openChat(userObj.username, userObj.uid);
+					} else {
+						ajaxify.go('chats/' + utils.slugify(userObj.username));
+					}
+				});
+			});
+		});
 	};
 
 	module.bringModalToTop = function(chatModal) {
 		var topZ = 0;
+
+		taskbar.updateActive(chatModal.attr('UUID'));
+
+		if ($('.chat-modal').length === 1) {
+			return;
+		}
 		$('.chat-modal').each(function() {
 			var thisZ = parseInt($(this).css('zIndex'), 10);
 			if (thisZ > topZ) {
 				topZ = thisZ;
 			}
 		});
+
 		chatModal.css('zIndex', topZ + 1);
 	};
 
@@ -136,134 +200,210 @@ define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar,
 	};
 
 	function checkStatus(chatModal) {
-		socket.emit('user.isOnline', chatModal.attr('touid'), function(err, data) {
-			translator.translate('[[global:' + data.status + ']]', function(translated) {
-				$('#chat-user-status').attr('class', 'fa fa-circle status ' + data.status)
-					.attr('title', translated)
-					.attr('data-original-title', translated);
-			});
+		socket.emit('user.checkStatus', chatModal.attr('touid'), function(err, status) {
+			if (err) {
+				return app.alertError(err.message);
+			}
+
+			app.updateUserStatus(chatModal.find('[component="user/status"]'), status);
 		});
 	}
 
-	function checkOnlineStatus(chatModal) {
-		if(parseInt(chatModal.attr('intervalId'), 10) === 0) {
-			chatModal.attr('intervalId', setInterval(function() {
-				checkStatus(chatModal);
-			}, 1000));
-		}
-	}
-
-	module.createModal = function(username, touid, callback) {
-
+	module.createModal = function(data, callback) {
 		templates.parse('chat', {}, function(chatTpl) {
 			translator.translate(chatTpl, function (chatTpl) {
 
 				var chatModal = $(chatTpl),
-					uuid = utils.generateUUID();
+					uuid = utils.generateUUID(),
+					dragged = false;
 
-				chatModal.attr('id', 'chat-modal-' + touid);
-				chatModal.attr('touid', touid);
+				chatModal.attr('id', 'chat-modal-' + data.touid);
+				chatModal.attr('touid', data.touid);
 				chatModal.attr('intervalId', 0);
 				chatModal.attr('UUID', uuid);
-				chatModal.css("position", "fixed");
+				chatModal.css('position', 'fixed');
+				chatModal.css('zIndex', 100);
 				chatModal.appendTo($('body'));
-				chatModal.draggable({
-					start:function() {
-						module.bringModalToTop(chatModal);
-					},
-					stop:function() {
-						chatModal.find('#chat-message-input').focus();
-					},
-					distance: 10,
-					handle: '.modal-header'
+				module.center(chatModal);
+
+				app.loadJQueryUI(function() {
+					chatModal.find('.modal-content').resizable({
+						minHeight: 250,
+						minWidth: 400
+					});
+
+					chatModal.find('.modal-content').on('resize', function(event, ui) {
+						if (ui.originalSize.height === ui.size.height) {
+							return;
+						}
+
+						chatModal.find('.chat-content').css('height', module.calculateChatListHeight(chatModal));
+					});
+
+					chatModal.draggable({
+						start:function() {
+							module.bringModalToTop(chatModal);
+						},
+						stop:function() {
+							chatModal.find('#chat-message-input').focus();
+						},
+						distance: 10,
+						handle: '.modal-header'
+					});
 				});
 
-				chatModal.find('.modal-content').resizable({
-					minHeight: 250,
-					minWidth: 400
-				});
-
-				chatModal.find('.modal-content').on('resize', function(event, ui) {
-					if (ui.originalSize.height === ui.size.height) {
-						return;
-					}
-					var totalHeight = chatModal.find('.modal-content').outerHeight() - chatModal.find('.modal-header').outerHeight();
-					var padding = parseInt(chatModal.find('.modal-body').css('padding-top'), 10) + parseInt(chatModal.find('.modal-body').css('padding-bottom'), 10);
-					var contentMargin = parseInt(chatModal.find('#chat-content').css('margin-top'), 10) + parseInt(chatModal.find('#chat-content').css('margin-bottom'), 10);
-					var inputGroupHeight = chatModal.find('.input-group').outerHeight();
-
-					chatModal.find('#chat-content').css('height', totalHeight - padding - contentMargin - inputGroupHeight);
-				});
-
-				chatModal.find('#chat-with-name').html(username);
+				chatModal.find('#chat-with-name').html(data.username);
 
 				chatModal.find('#chat-close-btn').on('click', function() {
 					module.close(chatModal);
 				});
 
-				chatModal.find('button[data-action="maximize"]').on('click', function() {
-					ajaxify.go('chats/' + utils.slugify(username));
+				function gotoChats() {
+					var text = components.get('chat/input').val();
+					$(window).one('action:ajaxify.end', function() {
+						components.get('chat/input').val(text);
+					});
+
+					ajaxify.go('chats/' + utils.slugify(data.username));
 					module.close(chatModal);
-				});
+				}
+
+				chatModal.find('.modal-header').on('dblclick', gotoChats);
+				chatModal.find('button[data-action="maximize"]').on('click', gotoChats);
 
 				chatModal.on('click', function(e) {
 					module.bringModalToTop(chatModal);
+
+					if (!dragged) {
+						chatModal.find('#chat-message-input').focus();
+					} else {
+						dragged = false;
+					}
+				});
+
+				chatModal.on('mousemove', function(e) {
+					if (e.which === 1) {
+						dragged = true;
+					}
 				});
 
 				chatModal.on('mousemove keypress click', function() {
 					if (newMessage) {
-						socket.emit('modules.chats.markRead', touid);
+						socket.emit('modules.chats.markRead', data.touid);
 						newMessage = false;
 					}
 				});
 
-				addSendHandler(chatModal);
+				Chats.addSinceHandler(chatModal.attr('touid'), chatModal.find('.chat-content'), chatModal.find('[data-since]'));
 
-				getChatMessages(chatModal, function() {
-					checkOnlineStatus(chatModal);
+				Chats.addSendHandlers(chatModal.attr('touid'), chatModal.find('#chat-message-input'), chatModal.find('#chat-message-send-btn'));
+
+				Chats.loadChatSince(chatModal.attr('touid'), chatModal.find('.chat-content'), 'recent');
+
+				checkStatus(chatModal);
+
+				module.canMessage(data.touid, function(err) {
+					if (err) {
+						// Disable the text input
+						chatModal.find('input[type="text"]').attr('disabled', true);
+					}
 				});
 
-				chatModal.find('.user-typing .text').translateText('[[modules:chat.user_typing, ' + username + ']]');
-
 				taskbar.push('chat', chatModal.attr('UUID'), {
-					title: username,
+					title: data.username,
+					touid: data.touid,
 					icon: 'fa-comment',
 					state: ''
 				});
 
+				if (!data.silent) {
+					socket.emit('modules.chats.open', data);
+				}
+
 				$(window).trigger('action:chat.loaded', chatModal);
 
-				callback(chatModal);
+				if (typeof callback === 'function') {
+					callback(chatModal);
+				}
 			});
 		});
 	};
 
-	module.close = function(chatModal) {
+	module.focusInput = function(chatModal) {
+		chatModal.find('#chat-message-input').focus();
+	};
+
+	module.close = function(chatModal, silent) {
 		clearInterval(chatModal.attr('intervalId'));
 		chatModal.attr('intervalId', 0);
 		chatModal.remove();
 		chatModal.data('modal', null);
 		taskbar.discard('chat', chatModal.attr('UUID'));
 		Chats.notifyTyping(chatModal.attr('touid'), false);
+
+		if (!silent) {
+			socket.emit('modules.chats.close', chatModal.attr('touid'));
+		}
+
+		if (chatModal.attr('data-mobile')) {
+			module.disableMobileBehaviour(chatModal);
+		}
 	};
 
 	module.center = function(chatModal) {
-		chatModal.css("left", Math.max(0, (($(window).width() - $(chatModal).outerWidth()) / 2) + $(window).scrollLeft()) + "px");
-		chatModal.css("top", Math.max(0, $(window).height() / 4 - $(chatModal).outerHeight() / 2));
-		chatModal.css("zIndex", 2000);
-		chatModal.find('#chat-message-input').focus();
+		var hideAfter = false;
+		if (chatModal.hasClass('hide')) {
+			chatModal.removeClass('hide');
+			hideAfter = true;
+		}
+		chatModal.css('left', Math.max(0, (($(window).width() - $(chatModal).outerWidth()) / 2) + $(window).scrollLeft()) + 'px');
+		chatModal.css('top', Math.max(0, $(window).height() / 2 - $(chatModal).outerHeight() / 2) + 'px');
+
+		if (hideAfter) {
+			chatModal.addClass('hide');
+		}
 		return chatModal;
 	};
 
 	module.load = function(uuid) {
 		var chatModal = $('div[UUID="'+uuid+'"]');
 		chatModal.removeClass('hide');
-		checkOnlineStatus(chatModal);
+		checkStatus(chatModal);
 		taskbar.updateActive(uuid);
-		Chats.scrollToBottom(chatModal.find('#chat-content'));
-		module.center(chatModal);
+		Chats.scrollToBottom(chatModal.find('.chat-content'));
 		module.bringModalToTop(chatModal);
+		module.focusInput(chatModal);
 		socket.emit('modules.chats.markRead', chatModal.attr('touid'));
+
+		var env = utils.findBootstrapEnvironment();
+		if (env === 'xs' || env === 'sm') {
+			module.enableMobileBehaviour(chatModal);
+		}
+	};
+
+	module.enableMobileBehaviour = function(modalEl) {
+		app.toggleNavbar(false);
+		modalEl.attr('data-mobile', '1');
+		var messagesEl = modalEl.find('.chat-content');
+		messagesEl.css('height', module.calculateChatListHeight(modalEl));
+
+		$(window).on('resize', function() {
+			messagesEl.css('height', module.calculateChatListHeight(modalEl));
+		});
+	};
+
+	module.disableMobileBehaviour = function(modalEl) {
+		app.toggleNavbar(true);
+	};
+
+	module.calculateChatListHeight = function(modalEl) {
+		var totalHeight = modalEl.find('.modal-content').outerHeight() - modalEl.find('.modal-header').outerHeight(),
+			padding = parseInt(modalEl.find('.modal-body').css('padding-top'), 10) + parseInt(modalEl.find('.modal-body').css('padding-bottom'), 10),
+			contentMargin = parseInt(modalEl.find('.chat-content').css('margin-top'), 10) + parseInt(modalEl.find('.chat-content').css('margin-bottom'), 10),
+			sinceHeight = modalEl.find('.since-bar').outerHeight(true),
+			inputGroupHeight = modalEl.find('.input-group').outerHeight();
+
+		return totalHeight - padding - contentMargin - sinceHeight - inputGroupHeight;
 	};
 
 	module.minimize = function(uuid) {
@@ -275,53 +415,32 @@ define('chat', ['taskbar', 'string', 'sounds', 'forum/chats'], function(taskbar,
 		Chats.notifyTyping(chatModal.attr('touid'), false);
 	};
 
-	function getChatMessages(chatModal, callback) {
-		socket.emit('modules.chats.get', {touid: chatModal.attr('touid')}, function(err, messages) {
-			module.appendChatMessage(chatModal, messages, callback);
-		});
-	}
+	module.toggleNew = taskbar.toggleNew;
 
-	function addSendHandler(chatModal) {
-		var input = chatModal.find('#chat-message-input');
-		input.off('keypress').on('keypress', function(e) {
-			if(e.which === 13) {
-				Chats.sendMessage(chatModal.attr('touid'), chatModal.find('#chat-message-input'));
-			}
-		});
-
-		input.off('keyup').on('keyup', function() {
-			if ($(this).val()) {
-				socket.emit('modules.chats.userStartTyping', {touid:chatModal.attr('touid'), fromUid: app.uid});
-			} else {
-				Chats.notifyTyping(chatModal.attr('touid'), false);
-			}
-		});
-
-		chatModal.find('#chat-message-send-btn').off('click').on('click', function(e){
-			Chats.sendMessage(chatModal.attr('touid'), chatModal.find('#chat-message-input'));
-			return false;
-		});
-	}
-
-	module.appendChatMessage = function(chatModal, data, done) {
-		var chatContent = chatModal.find('#chat-content'),
-			typingNotif = chatModal.find('.user-typing');
-
-		Chats.parseMessage(data, function(html) {
-			var message = $(html);
-			message.find('img:not(".chat-user-image")').addClass('img-responsive');
-			message.find('span.timeago').timeago();
-			message.insertBefore(typingNotif);
-			Chats.scrollToBottom(chatContent);
-
-			if (typeof done === 'function') {
-				done();
-			}
-		});
+	module.canMessage = function(toUid, callback) {
+		socket.emit('modules.chats.canMessage', toUid, callback);
 	};
 
-	module.toggleNew = function(uuid, state) {
-		taskbar.toggleNew(uuid, state);
+	module.sync = function() {
+		socket.emit('modules.chats.sync', function(err, users) {
+			if (err) {
+				return app.alertError(err.message);
+			}
+
+			users.forEach(function(user) {
+				if (!module.modalExists(user.uid)) {
+					module.createModal({
+						username: user.username,
+						touid: user.uid,
+						silent: true
+					}, function(modal) {
+						if (user.new) {
+							module.toggleNew(modal.attr('UUID'), true, true);
+						}
+					});
+				}
+			});
+		});
 	};
 
 	return module;

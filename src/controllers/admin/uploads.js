@@ -2,80 +2,89 @@
 
 var fs = require('fs'),
 	path = require('path'),
-	file = require('./../../file'),
-	plugins = require('./../../plugins');
+	async = require('async'),
+	nconf = require('nconf'),
+	winston = require('winston'),
+	file = require('../../file'),
+	image = require('../../image'),
+	plugins = require('../../plugins');
 
 
 var uploadsController = {};
 
-function validateUpload(res, req, allowedTypes) {
-	if (allowedTypes.indexOf(req.files.userPhoto.type) === -1) {
-		var err = {
-			error: 'Invalid image type. Allowed types are: ' + allowedTypes.join(', ')
-		};
-
-		res.send(req.xhr ? err : JSON.stringify(err));
-		return false;
-	}
-
-	return true;
-}
-
-
-
-uploadsController.uploadImage = function(filename, req, res) {
-	function done(err, image) {
-		var er, rs;
-		fs.unlink(req.files.userPhoto.path);
-
-		if(err) {
-			er = {error: err.message};
-			return res.send(req.xhr ? er : JSON.stringify(er));
-		}
-
-		rs = {path: image.url};
-		res.send(req.xhr ? rs : JSON.stringify(rs));
-	}
-
-	if(plugins.hasListeners('filter:uploadImage')) {
-		plugins.fireHook('filter:uploadImage', req.files.userPhoto, done);
-	} else {
-		file.saveFileToLocal(filename, req.files.userPhoto.path, done);
-	}
-};
-
 uploadsController.uploadCategoryPicture = function(req, res, next) {
+	var uploadedFile = req.files.files[0];
 	var allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/svg+xml'],
 		params = null;
 
 	try {
 		params = JSON.parse(req.body.params);
 	} catch (e) {
-		var err = {
-			error: 'Error uploading file! Error :' + e.message
-		};
-		return res.send(req.xhr ? err : JSON.stringify(err));
+		fs.unlink(uploadedFile.path, function(err) {
+			if (err) {
+				winston.error(err);
+			}
+		});
+		return next(e);
 	}
 
-	if (validateUpload(res, req, allowedTypes)) {
-		var filename =  'category-' + params.cid + path.extname(req.files.userPhoto.name);
-		uploadsController.uploadImage(filename, req, res);
+	if (validateUpload(req, res, next, uploadedFile, allowedTypes)) {
+		var filename =  'category-' + params.cid + path.extname(uploadedFile.name);
+		uploadImage(filename, 'category', uploadedFile, req, res, next);
 	}
 };
 
 uploadsController.uploadFavicon = function(req, res, next) {
+	var uploadedFile = req.files.files[0];
 	var allowedTypes = ['image/x-icon', 'image/vnd.microsoft.icon'];
 
-	if (validateUpload(res, req, allowedTypes)) {
-		file.saveFileToLocal('favicon.ico', req.files.userPhoto.path, function(err, image) {
-			fs.unlink(req.files.userPhoto.path);
-
-			if(err) {
-				return res.send(req.xhr ? err : JSON.stringify(err));
+	if (validateUpload(req, res, next, uploadedFile, allowedTypes)) {
+		file.saveFileToLocal('favicon.ico', 'system', uploadedFile.path, function(err, image) {
+			fs.unlink(uploadedFile.path, function(err) {
+				if (err) {
+					winston.error(err);
+				}
+			});
+			if (err) {
+				return next(err);
 			}
 
-			var rs = {path: image.url};
-			res.send(req.xhr ? rs : JSON.stringify(rs));
+			res.json([{name: uploadedFile.name, url: image.url}]);
+		});
+	}
+};
+
+uploadsController.uploadTouchIcon = function(req, res, next) {
+	var uploadedFile = req.files.files[0],
+		allowedTypes = ['image/png'],
+		sizes = [36, 48, 72, 96, 144, 192];
+
+	if (validateUpload(req, res, next, uploadedFile, allowedTypes)) {
+		file.saveFileToLocal('touchicon-orig.png', 'system', uploadedFile.path, function(err, imageObj) {
+			// Resize the image into squares for use as touch icons at various DPIs
+			async.each(sizes, function(size, next) {
+				async.series([
+					async.apply(file.saveFileToLocal, 'touchicon-' + size + '.png', 'system', uploadedFile.path),
+					async.apply(image.resizeImage, {
+						path: path.join(nconf.get('base_dir'), nconf.get('upload_path'), 'system', 'touchicon-' + size + '.png'),
+						extension: 'png',
+						width: size,
+						height: size
+					})
+				], next);
+			}, function(err) {
+				fs.unlink(uploadedFile.path, function(err) {
+					if (err) {
+						winston.error(err);
+					}
+				});
+
+				if (err) {
+					return next(err);
+				}
+
+				res.json([{name: uploadedFile.name, url: imageObj.url}]);
+			});
 		});
 	}
 };
@@ -89,11 +98,46 @@ uploadsController.uploadGravatarDefault = function(req, res, next) {
 };
 
 function upload(name, req, res, next) {
+	var uploadedFile = req.files.files[0];
 	var allowedTypes = ['image/png', 'image/jpeg', 'image/pjpeg', 'image/jpg', 'image/gif'];
+	if (validateUpload(req, res, next, uploadedFile, allowedTypes)) {
+		var filename = name + path.extname(uploadedFile.name);
+		uploadImage(filename, 'system', uploadedFile, req, res, next);
+	}
+}
 
-	if (validateUpload(res, req, allowedTypes)) {
-		var filename = name + path.extname(req.files.userPhoto.name);
-		uploadsController.uploadImage(filename, req, res);
+function validateUpload(req, res, next, uploadedFile, allowedTypes) {
+	if (allowedTypes.indexOf(uploadedFile.type) === -1) {
+		fs.unlink(uploadedFile.path, function(err) {
+			if (err) {
+				winston.error(err);
+			}
+		});
+
+		res.json({error: '[[error:invalid-image-type, ' + allowedTypes.join(', ') + ']]'});
+		return false;
+	}
+
+	return true;
+}
+
+function uploadImage(filename, folder, uploadedFile, req, res, next) {
+	function done(err, image) {
+		fs.unlink(uploadedFile.path, function(err) {
+			if (err) {
+				winston.error(err);
+			}
+		});
+		if (err) {
+			return next(err);
+		}
+		res.json([{name: uploadedFile.name, url: image.url.startsWith('http') ? image.url : nconf.get('relative_path') + image.url}]);
+	}
+
+	if (plugins.hasListeners('filter:uploadImage')) {
+		plugins.fireHook('filter:uploadImage', {image: uploadedFile, uid: req.user.uid}, done);
+	} else {
+		file.saveFileToLocal(filename, folder, uploadedFile.path, done);
 	}
 }
 

@@ -4,101 +4,32 @@
 var async = require('async'),
 	nconf = require('nconf'),
 	winston = require('winston'),
+	S = require('string'),
 
 	user = require('../user'),
-	utils = require('../../public/src/utils'),
 	db = require('../database'),
+	meta = require('../meta'),
 	notifications = require('../notifications'),
 	posts = require('../posts'),
-	postTools = require('../postTools'),
 	topics = require('../topics'),
-	privileges = require('../privileges');
+	privileges = require('../privileges'),
+	utils = require('../../public/src/utils');
 
 (function(UserNotifications) {
 
 	UserNotifications.get = function(uid, callback) {
-		function getNotifications(set, start, stop, iterator, done) {
-			db.getSortedSetRevRange(set, start, stop, function(err, uniqueIds) {
-				if(err) {
-					return done(err);
-				}
-
-				if(!Array.isArray(uniqueIds) || !uniqueIds.length) {
-					return done(null, []);
-				}
-
-				if (uniqueIds.length > maxNotifs) {
-					uniqueIds.length = maxNotifs;
-				}
-
-				db.getObjectFields('uid:' + uid + ':notifications:uniqueId:nid', uniqueIds, function(err, uniqueIdToNids) {
-					if (err) {
-						return done(err);
-					}
-
-					var nidsToUniqueIds = {};
-					var nids = [];
-					uniqueIds.forEach(function(uniqueId) {
-						nidsToUniqueIds[uniqueIdToNids[uniqueId]] = uniqueId;
-						nids.push(uniqueIdToNids[uniqueId]);
-					});
-
-					async.map(nids, function(nid, next) {
-						notifications.get(nid, function(err, notif_data) {
-							if (err) {
-								return next(err);
-							}
-
-							if (!notif_data) {
-								if (process.env.NODE_ENV === 'development') {
-									winston.info('[notifications.get] nid ' + nid + ' not found. Removing.');
-								}
-
-								db.sortedSetRemove(set, nidsToUniqueIds[nid]);
-								db.deleteObjectField('uid:' + uid + ':notifications:uniqueId:nid', nidsToUniqueIds[nid]);
-								return next();
-							}
-
-							if (typeof iterator === 'function') {
-								iterator(notif_data, next);
-							} else {
-								next(null, notif_data);
-							}
-						});
-					}, done);
-				});
-			});
+		if (!parseInt(uid, 10)) {
+			return callback(null , {read: [], unread: []});
 		}
-
-		var maxNotifs = 15;
-
-		async.parallel({
-			unread: function(next) {
-				getNotifications('uid:' + uid + ':notifications:unread', 0, 9, function(notif_data, next) {
-					notif_data.read = false;
-					notif_data.readClass = !notif_data.read ? 'label-warning' : '';
-					next(null, notif_data);
-				}, next);
-			},
-			read: function(next) {
-				getNotifications('uid:' + uid + ':notifications:read', 0, 9, function(notif_data, next) {
-					notif_data.read = true;
-					next(null, notif_data);
-				}, next);
-			}
-		}, function(err, notifications) {
-			function filterDeleted(notifObj) {
-				return !!notifObj;
-			}
-
+		getNotifications(uid, 10, function(err, notifications) {
 			if (err) {
 				return callback(err);
 			}
 
-			notifications.read = notifications.read.filter(filterDeleted);
-			notifications.unread = notifications.unread.filter(filterDeleted);
+			notifications.read = notifications.read.filter(Boolean);
+			notifications.unread = notifications.unread.filter(Boolean);
 
-			// Limit the number of notifications to `maxNotifs`, prioritising unread notifications
+			var maxNotifs = 15;
 			if (notifications.read.length + notifications.unread.length > maxNotifs) {
 				notifications.read.length = maxNotifs - notifications.unread.length;
 			}
@@ -107,177 +38,290 @@ var async = require('async'),
 		});
 	};
 
-	UserNotifications.getAll = function(uid, limit, before, callback) {
-		var	now = new Date();
+	UserNotifications.getAll = function(uid, count, callback) {
+		getNotifications(uid, count, function(err, notifs) {
+			if (err) {
+				return callback(err);
+			}
+			notifs = notifs.unread.concat(notifs.read);
+			notifs = notifs.filter(Boolean).sort(function(a, b) {
+				return b.datetime - a.datetime;
+			});
 
-		if (!limit || parseInt(limit, 10) <= 0) {
-			limit = 25;
-		}
-		if (before) {
-			before = new Date(parseInt(before, 10));
-		}
+			callback(null, notifs);
+		});
+	};
 
-		db.getObjectValues('uid:' + uid + ':notifications:uniqueId:nid', function(err, nids) {
+	function getNotifications(uid, count, callback) {
+		async.parallel({
+			unread: function(next) {
+				getNotificationsFromSet('uid:' + uid + ':notifications:unread', false, uid, 0, count - 1, next);
+			},
+			read: function(next) {
+				getNotificationsFromSet('uid:' + uid + ':notifications:read', true, uid, 0, count - 1, next);
+			}
+		}, callback);
+	}
+
+	function getNotificationsFromSet(set, read, uid, start, stop, callback) {
+		db.getSortedSetRevRange(set, start, stop, function(err, nids) {
 			if (err) {
 				return callback(err);
 			}
 
-			async.map(nids, function(nid, next) {
-				notifications.get(nid, function(err, notif_data) {
-					if (err || !notif_data) {
-						return next(err);
-					}
-					UserNotifications.isNotificationRead(notif_data.uniqueId, uid, function(err, isRead) {
-						if (err) {
-							return next(err);
-						}
+			if(!Array.isArray(nids) || !nids.length) {
+				return callback(null, []);
+			}
 
-						notif_data.read = isRead;
-						next(null, notif_data);
-					});
-				});
-			}, function(err, notifs) {
+			UserNotifications.getNotifications(nids, uid, function(err, notifications) {
 				if (err) {
 					return callback(err);
 				}
 
-				notifs = notifs.filter(function(notif) {
-					return !!notif;
-				}).sort(function(a, b) {
-					return parseInt(b.datetime, 10) - parseInt(a.datetime, 10);
-				}).map(function(notif) {
-					notif.datetimeISO = utils.toISOString(notif.datetime);
-					notif.readClass = !notif.read ? 'label-warning' : '';
-					return notif;
+				var deletedNids = [];
+
+				notifications.forEach(function(notification, index) {
+					if (!notification) {
+						if (process.env.NODE_ENV === 'development') {
+							winston.info('[notifications.get] nid ' + nids[index] + ' not found. Removing.');
+						}
+
+						deletedNids.push(nids[index]);
+					} else {
+						notification.read = read;
+						notification.readClass = !notification.read ? 'unread' : '';
+					}
 				});
 
-				callback(null, notifs);
+				if (deletedNids.length) {
+					db.sortedSetRemove(set, deletedNids);
+				}
+
+				callback(null, notifications);
 			});
+		});
+	}
+
+	UserNotifications.getNotifications = function(nids, uid, callback) {
+		notifications.getMultiple(nids, function(err, notifications) {
+			if (err) {
+				return callback(err);
+			}
+
+			UserNotifications.generateNotificationPaths(notifications, uid, callback);
 		});
 	};
 
-	UserNotifications.isNotificationRead = function(uniqueId, uid, callback) {
-		db.isSortedSetMember('uid:' + uid + ':notifications:read', uniqueId, callback);
+	UserNotifications.generateNotificationPaths = function (notifications, uid, callback) {
+		var pids = notifications.map(function(notification) {
+			return notification ? notification.pid : null;
+		});
+
+		generatePostPaths(pids, uid, function(err, pidToPaths) {
+			if (err) {
+				return callback(err);
+			}
+
+			notifications = notifications.map(function(notification, index) {
+				if (!notification) {
+					return null;
+				}
+
+				notification.path = pidToPaths[notification.pid] || notification.path || '';
+
+				if (notification.nid.startsWith('chat')) {
+					notification.path = nconf.get('relative_path') + '/chats/' + notification.user.userslug;
+				} else if (notification.nid.startsWith('follow')) {
+					notification.path = nconf.get('relative_path') + '/user/' + notification.user.userslug;
+				}
+
+				notification.datetimeISO = utils.toISOString(notification.datetime);
+				return notification;
+			});
+
+			callback(null, notifications);
+		});
 	};
+
+	function generatePostPaths(pids, uid, callback) {
+		pids = pids.filter(Boolean);
+		var postKeys = pids.map(function(pid) {
+			return 'post:' + pid;
+		});
+
+		db.getObjectsFields(postKeys, ['pid', 'tid'], function(err, postData) {
+			if (err) {
+				return callback(err);
+			}
+
+			var topicKeys = postData.map(function(post) {
+				return post ? 'topic:' + post.tid : null;
+			});
+
+			async.parallel({
+				indices: function(next) {
+					posts.getPostIndices(postData, uid, next);
+				},
+				topics: function(next) {
+					db.getObjectsFields(topicKeys, ['slug'], next);
+				}
+			}, function(err, results) {
+				if (err) {
+					return callback(err);
+				}
+
+				var pidToPaths = {};
+				pids.forEach(function(pid, index) {
+					var slug = results.topics[index] ? results.topics[index].slug : null;
+					var postIndex = utils.isNumber(results.indices[index]) ? parseInt(results.indices[index], 10) + 1 : null;
+
+					if (slug && postIndex) {
+						pidToPaths[pid] = nconf.get('relative_path') + '/topic/' + slug + '/' + postIndex;
+					}
+				});
+
+				callback(null, pidToPaths);
+			});
+		});
+	}
 
 	UserNotifications.getDailyUnread = function(uid, callback) {
 		var	now = Date.now(),
 			yesterday = now - (1000*60*60*24);	// Approximate, can be more or less depending on time changes, makes no difference really.
 
-		db.getSortedSetRangeByScore('uid:' + uid + ':notifications:unread', 0, 20, yesterday, now, function(err, uniqueIds) {
+		db.getSortedSetRevRangeByScore('uid:' + uid + ':notifications:unread', 0, 20, now, yesterday, function(err, nids) {
 			if (err) {
 				return callback(err);
 			}
 
-			if (!Array.isArray(uniqueIds) || !uniqueIds.length) {
+			if (!Array.isArray(nids) || !nids.length) {
 				return callback(null, []);
 			}
 
-			db.getObjectFields('uid:' + uid + ':notifications:uniqueId:nid', uniqueIds, function(err, uniqueIdToNids) {
-				if (err) {
-					return callback(err);
-				}
-
-				var nids = Object.keys(uniqueIdToNids).map(function(uniqueId) {
-					return uniqueIdToNids[uniqueId];
-				});
-
-				async.map(nids, function(nid, next) {
-					notifications.get(nid, next);
-				}, callback);
-			});
+			UserNotifications.getNotifications(nids, uid, callback);
 		});
 	};
 
 	UserNotifications.getUnreadCount = function(uid, callback) {
-		db.sortedSetCount('uid:' + uid + ':notifications:unread', -Infinity, Infinity, callback);
+		if (!parseInt(uid, 10)) {
+			return callback(null, 0);
+		}
+		db.getSortedSetRevRange('uid:' + uid + ':notifications:unread', 0, 20, function(err, nids) {
+			callback(err, Array.isArray(nids) ? nids.length : 0);
+		});
 	};
 
 	UserNotifications.getUnreadByField = function(uid, field, value, callback) {
-		db.getSortedSetRange('uid:' + uid + ':notifications:unread', 0, -1, function(err, uniqueIds) {
+		db.getSortedSetRevRange('uid:' + uid + ':notifications:unread', 0, 99, function(err, nids) {
 			if (err) {
 				return callback(err);
 			}
 
-			if (!Array.isArray(uniqueIds) || !uniqueIds.length) {
+			if (!Array.isArray(nids) || !nids.length) {
 				return callback(null, []);
 			}
 
-			db.getObjectFields('uid:' + uid + ':notifications:uniqueId:nid', uniqueIds, function(err, uniqueIdsToNids) {
+			var keys = nids.map(function(nid) {
+				return 'notifications:' + nid;
+			});
+
+			db.getObjectsFields(keys, ['nid', field], function(err, notifications) {
 				if (err) {
 					return callback(err);
 				}
 
-				var nids = Object.keys(uniqueIdsToNids).map(function(uniqueId) {
-					return uniqueIdsToNids[uniqueId];
+				value = value ? value.toString() : '';
+				nids = notifications.filter(function(notification) {
+					return notification && notification[field] && notification[field].toString() === value;
+				}).map(function(notification) {
+					return notification.nid;
 				});
 
-				async.filter(nids, function(nid, next) {
-					notifications.get(nid, function(err, notifObj) {
-						if (err || !notifObj) {
-							return next(false);
-						}
+				callback(null, nids);
+			});
+		});
+	};
 
-						next(notifObj[field] === value.toString());
-					});
-				}, function(nids) {
-					callback(null, nids);
+	UserNotifications.deleteAll = function(uid, callback) {
+		if (!parseInt(uid, 10)) {
+			return callback();
+		}
+		async.parallel([
+			function(next) {
+				db.delete('uid:' + uid + ':notifications:unread', next);
+			},
+			function(next) {
+				db.delete('uid:' + uid + ':notifications:read', next);
+			}
+		], callback);
+	};
+
+	UserNotifications.sendTopicNotificationToFollowers = function(uid, topicData, postData) {
+		db.getSortedSetRange('followers:' + uid, 0, -1, function(err, followers) {
+			if (err || !Array.isArray(followers) || !followers.length) {
+				return;
+			}
+
+			privileges.categories.filterUids('read', topicData.cid, followers, function(err, followers) {
+				if (err || !followers.length) {
+					return;
+				}
+
+				var title = topicData.title;
+				if (title) {
+					title = S(title).decodeHTMLEntities().s;
+				}
+
+				notifications.create({
+					bodyShort: '[[notifications:user_posted_topic, ' + postData.user.username + ', ' + title + ']]',
+					bodyLong: postData.content,
+					pid: postData.pid,
+					nid: 'tid:' + postData.tid + ':uid:' + uid,
+					tid: postData.tid,
+					from: uid
+				}, function(err, notification) {
+					if (!err && notification) {
+						notifications.push(notification, followers);
+					}
 				});
 			});
 		});
 	};
 
+	UserNotifications.sendWelcomeNotification = function(uid, callback) {
+		callback = callback || function() {};
+		if (!meta.config.welcomeNotification) {
+			return callback();
+		}
 
-	UserNotifications.sendPostNotificationToFollowers = function(uid, tid, pid) {
-		db.getSetMembers('followers:' + uid, function(err, followers) {
-			if (err || !followers || !followers.length) {
-				return;
+		var path = meta.config.welcomeLink ? meta.config.welcomeLink : '#';
+
+		notifications.create({
+			bodyShort: meta.config.welcomeNotification,
+			path: path,
+			nid: 'welcome_' + uid
+		}, function(err, notification) {
+			if (err) {
+				return callback(err);
 			}
+			if (notification) {
+				notifications.push(notification, [uid], callback);
+			} else {
+				callback();
+			}
+		});
+	};
 
-			async.parallel({
-				username: async.apply(user.getUserField, uid, 'username'),
-				topic: async.apply(topics.getTopicFields, tid, ['slug', 'cid', 'title']),
-				postIndex: async.apply(posts.getPidIndex, pid),
-				postContent: function(next) {
-					async.waterfall([
-						async.apply(posts.getPostField, pid, 'content'),
-						function(content, next) {
-							postTools.parse(content, next);
-						}
-					], next);
-				},
-				topicFollowers: function(next) {
-					db.isSetMembers('tid:' + tid + ':followers', followers, next);
-				}
-			}, function(err, results) {
-				if (err) {
-					return;
-				}
-
-				followers = followers.filter(function(value, index) {
-					return !results.topicFollowers[index];
-				});
-
-				notifications.create({
-					bodyShort: '[[notifications:user_posted_to, ' + results.username + ', ' + results.topic.title + ']]',
-					bodyLong: results.postContent,
-					path: nconf.get('relative_path') + '/topic/' + results.topic.slug + '/' + results.postIndex,
-					uniqueId: 'topic:' + tid + ':uid:' + uid,
-					tid: tid,
-					from: uid
-				}, function(err, nid) {
-					if (err) {
-						return;
-					}
-					async.filter(followers, function(uid, next) {
-						privileges.categories.can('read', results.topic.cid, uid, function(err, canRead) {
-							next(!err && canRead);
-						});
-					}, function(followers){
-						notifications.push(nid, followers);
-					});
-				});
-			});
+	UserNotifications.sendNameChangeNotification = function(uid, username) {
+		notifications.create({
+			bodyShort: '[[user:username_taken_workaround, ' + username + ']]',
+			image: 'brand:logo',
+			nid: 'username_taken:' + uid,
+			datetime: Date.now()
+		}, function(err, notification) {
+			if (!err && notification) {
+				notifications.push(notification, uid);
+			}
 		});
 	};
 
@@ -285,7 +329,7 @@ var async = require('async'),
 		var websockets = require('./../socket.io');
 		UserNotifications.getUnreadCount(uid, function(err, count) {
 			if (err) {
-				return winston.warn('[User.pushNotifCount] Count not retrieve unread notifications count to push to uid ' + uid + '\'s client(s)');
+				return winston.error(err.stack);
 			}
 
 			websockets.in('uid_' + uid).emit('event:notifications.updateCount', count);

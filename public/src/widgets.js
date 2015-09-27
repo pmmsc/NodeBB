@@ -1,5 +1,5 @@
 "use strict";
-/*global ajaxify, templates*/
+/*global ajaxify, templates, config, RELATIVE_PATH*/
 
 (function(ajaxify) {
 	ajaxify.widgets = {};
@@ -15,6 +15,10 @@
 	};
 
 	ajaxify.widgets.render = function(template, url, callback) {
+		if (template.match(/^admin/)) {
+			return callback();
+		}
+
 		var widgetLocations = ['sidebar', 'footer', 'header'], numLocations;
 
 		$('#content [widget-area]').each(function() {
@@ -30,60 +34,62 @@
 			ajaxify.widgets.reposition();
 		}
 
-		function renderWidgets(location) {
-			var area = $('#content [widget-area="' + location + '"]'),
-				areaData = {
-					location: location,
-					template: template + '.tpl',
-					url: url
-				};
+		function renderWidgets(locations) {
+			var areaDatas = [];
 
-			$.get(RELATIVE_PATH + '/api/widgets/render', areaData, function(renderedWidgets) {
-				var html = '';
+			$.get(RELATIVE_PATH + '/api/widgets/render' + (config['cache-buster'] ? '?v=' + config['cache-buster'] : ''), {
+				locations: locations,
+				template: template + '.tpl',
+				url: url
+			}, function(renderedAreas) {
+				for (var x=0; x<renderedAreas.length; ++x) {
+					var renderedWidgets = renderedAreas[x].widgets,
+						location = renderedAreas[x].location,
+						html = '';
 
-				for (var i=0; i<renderedWidgets.length; ++i) {
-					html += templates.parse(renderedWidgets[i].html, {});
-				}
-
-				if (!area.length && window.location.pathname.indexOf('/admin') === -1 && renderedWidgets.length) {
-					if (location === 'footer' && !$('#content [widget-area="footer"]').length) {
-						$('#content').append($('<div class="col-xs-12"><div widget-area="footer"></div></div>'));
-					} else if (location === 'sidebar' && !$('#content [widget-area="sidebar"]').length) {
-						$('#content > *').wrapAll($('<div class="col-lg-9 col-xs-12"></div>'));
-						$('#content').append($('<div class="col-lg-3 col-xs-12"><div widget-area="sidebar"></div></div>'));
-					} else if (location === 'header' && !$('#content [widget-area="header"]').length) {
-						$('#content').prepend($('<div class="col-xs-12"><div widget-area="header"></div></div>'));
+					for (var i=0; i<renderedWidgets.length; ++i) {
+						html += templates.parse(renderedWidgets[i].html, {});
 					}
 
-					area = $('#content [widget-area="' + location + '"]');
+					var area = $('#content [widget-area="' + location + '"]');
+
+					if (!area.length && window.location.pathname.indexOf('/admin') === -1 && renderedWidgets.length) {
+						if (location === 'footer' && !$('#content [widget-area="footer"]').length) {
+							$('#content').append($('<div class="row"><div widget-area="footer" class="col-xs-12"></div></div>'));
+						} else if (location === 'sidebar' && !$('#content [widget-area="sidebar"]').length) {
+							$('#content > *').wrapAll($('<div class="row"><div class="col-lg-9 col-xs-12"></div><div widget-area="sidebar" class="col-lg-3 col-xs-12"></div></div></div>'));
+						} else if (location === 'header' && !$('#content [widget-area="header"]').length) {
+							$('#content').prepend($('<div class="row"><div widget-area="header" class="col-xs-12"></div></div>'));
+						}
+
+						area = $('#content [widget-area="' + location + '"]');
+					}
+
+					area.html(html);
+
+					if (!renderedWidgets.length) {
+						area.addClass('hidden');
+						ajaxify.widgets.reposition(location);
+					}
 				}
 
-				area.html(html);
-
-				if (!renderedWidgets.length) {
-					area.addClass('hidden');
-					ajaxify.widgets.reposition(location);
-				}
-
-				$('#content [widget-area] img:not(.user-img)').addClass('img-responsive');
-				checkCallback();
-			});
-		}
-
-		function checkCallback() {
-			numLocations--;
-			if (numLocations < 0) {
+				var widgetAreas = $('#content [widget-area]');
+				widgetAreas.find('img:not(.not-responsive)').addClass('img-responsive');
+				widgetAreas.find('.timeago').timeago();
+				widgetAreas.find('img[title].teaser-pic,img[title].user-img').each(function() {
+					$(this).tooltip({
+						placement: 'top',
+						title: $(this).attr('title')
+					});
+				});
 				$(window).trigger('action:widgets.loaded', {});
+
 				if (typeof callback === 'function') {
 					callback();
 				}
-			}
+			});
 		}
 
-		for (var i=0; i<widgetLocations.length; ++i) {
-			renderWidgets(widgetLocations[i]);
-		}
-
-		checkCallback();
+		renderWidgets(widgetLocations);
 	};
 }(ajaxify || {}));

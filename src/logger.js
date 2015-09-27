@@ -125,7 +125,7 @@ var opts = {
 		/*
 		 * Always initialize "ofn" (original function) with the original logger function
 		 */
-		opts.express.ofn = morgan({stream : opts.streams.log.f});
+		opts.express.ofn = morgan('combined', {stream : opts.streams.log.f});
 	};
 
 	Logger.expressLogger = function(req,res,next) {
@@ -159,7 +159,7 @@ var opts = {
 		/*
 		 * Restore all hijacked sockets to their original emit/on functions
 		 */
-		var clients = socket.io.sockets.clients();
+		var clients = []; //socket.io.sockets.clients(); doesn't work in socket.io 1.x
 		clients.forEach(function(client) {
 			if(client.oEmit && client.oEmit !== client.emit) {
 				client.emit = client.oEmit;
@@ -175,11 +175,12 @@ var opts = {
 		/*
 		 * Go through all of the currently established sockets & hook their .emit/.on
 		 */
-		if(!socket && !socket.io.sockets) {
+
+		if (!socket || !socket.io || !socket.io.sockets || !Array.isArray(socket.io.sockets.sockets)) {
 			return;
 		}
 
-		var clients = socket.io.sockets.clients();
+		var clients = socket.io.sockets.sockets;
 
 		clients.forEach(function(client) {
 			Logger.io_one(client, client.uid);
@@ -190,33 +191,29 @@ var opts = {
 		/*
 		 * This function replaces a socket's .emit/.on functions in order to intercept events
 		 */
-		if(socket && meta.config.loggerIOStatus > 0) {
-
-			(function() {
-				function override(method, name, errorMsg) {
-					return function() {
-						if(opts.streams.log.f) {
-							opts.streams.log.f.write(Logger.prepare_io_string(name, uid, arguments));
-						}
-
-						try {
-							method.apply(socket, arguments);
-						} catch(err) {
-							winston.info(errorMsg, err);
-						}
-					};
+		function override(method, name, errorMsg) {
+			return function() {
+				if(opts.streams.log.f) {
+					opts.streams.log.f.write(Logger.prepare_io_string(name, uid, arguments));
 				}
 
-				// courtesy of: http://stackoverflow.com/a/9674248
-				socket.oEmit = socket.emit;
-				var emit = socket.emit;
-				socket.emit = override(emit, 'emit', 'Logger.io_one: emit.apply: Failed');
+				try {
+					method.apply(socket, arguments);
+				} catch(err) {
+					winston.info(errorMsg, err);
+				}
+			};
+		}
 
-				socket.$oEmit = socket.$emit;
-				var $emit = socket.$emit;
-				socket.$emit = override($emit, 'on', 'Logger.io_one: $emit.apply: Failed');
+		if (socket && meta.config.loggerIOStatus > 0) {
+			// courtesy of: http://stackoverflow.com/a/9674248
+			socket.oEmit = socket.emit;
+			var emit = socket.emit;
+			socket.emit = override(emit, 'emit', 'Logger.io_one: emit.apply: Failed');
 
-			})();
+			socket.$oEmit = socket.$emit;
+			var $emit = socket.$emit;
+			socket.$emit = override($emit, 'on', 'Logger.io_one: $emit.apply: Failed');
 		}
 	};
 

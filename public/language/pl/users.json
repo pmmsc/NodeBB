@@ -5,6 +5,17 @@
     "search": "Szukaj",
     "enter_username": "Wpisz nazwę użytkownika",
     "load_more": "Więcej",
-    "user-not-found": "User not found!",
-    "users-found-search-took": "%1 user(s) found! Search took %2 ms."
+    "users-found-search-took": "Znaleziono %1 użytkownik(ów). Szukanie zajęło %2 sek.",
+    "filter-by": "Filtruj",
+    "online-only": "Tylko dostępny",
+    "picture-only": "Tylko ze zdjęciem",
+    "invite": "Invite",
+    "invitation-email-sent": "An invitation email has been sent to %1",
+    "user_list": "User List",
+    "recent_topics": "Recent Topics",
+    "popular_topics": "Popular Topics",
+    "unread_topics": "Unread Topics",
+    "categories": "Categories",
+    "tags": "Tags",
+    "map": "Map"
 }

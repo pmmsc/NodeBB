@@ -2,6 +2,7 @@
 'use strict';
 
 var async = require('async'),
+	plugins = require('../plugins'),
 	db = require('./../database');
 
 module.exports = function(User) {
@@ -15,54 +16,78 @@ module.exports = function(User) {
 	};
 
 	function toggleFollow(type, uid, theiruid, callback) {
-		var command = type === 'follow' ? 'setAdd' : 'setRemove';
-		db[command]('following:' + uid, theiruid, function(err) {
-			if(err) {
-				return callback(err);
-			}
-			db[command]('followers:' + theiruid, uid, callback);
-		});
-	}
+		if (!parseInt(uid, 10) || !parseInt(theiruid, 10)) {
+			return callback(new Error('[[error:invalid-uid]]'));
+		}
 
-	User.getFollowing = function(uid, callback) {
-		getFollow('following:' + uid, callback);
-	};
+		if (parseInt(uid, 10) === parseInt(theiruid, 10)) {
+			return callback(new Error('[[error:you-cant-follow-yourself]]'));
+		}
 
-	User.getFollowers = function(uid, callback) {
-		getFollow('followers:' + uid, callback);
-	};
-
-	function getFollow(set, callback) {
-		db.getSetMembers(set, function(err, uids) {
-			if(err) {
+		User.isFollowing(uid, theiruid, function(err, isFollowing) {
+			if (err) {
 				return callback(err);
 			}
 
-			User.getUsers(uids, callback);
+			if (type === 'follow') {
+				if (isFollowing) {
+					return callback(new Error('[[error:already-following]]'));
+				}
+				var now = Date.now();
+				async.parallel([
+					async.apply(db.sortedSetAdd, 'following:' + uid, now, theiruid),
+					async.apply(db.sortedSetAdd, 'followers:' + theiruid, now, uid),
+					async.apply(User.incrementUserFieldBy, uid, 'followingCount', 1),
+					async.apply(User.incrementUserFieldBy, theiruid, 'followerCount', 1)
+				], callback);
+			} else {
+				if (!isFollowing) {
+					return callback(new Error('[[error:not-following]]'));
+				}
+				async.parallel([
+					async.apply(db.sortedSetRemove, 'following:' + uid, theiruid),
+					async.apply(db.sortedSetRemove, 'followers:' + theiruid, uid),
+					async.apply(User.decrementUserFieldBy, uid, 'followingCount', 1),
+					async.apply(User.decrementUserFieldBy, theiruid, 'followerCount', 1)
+				], callback);
+			}
 		});
 	}
 
-	User.getFollowingCount = function(uid, callback) {
-		db.setCount('following:' + uid, callback);
+	User.getFollowing = function(uid, start, stop, callback) {
+		getFollow(uid, 'following', start, stop, callback);
 	};
 
-	User.getFollowerCount = function(uid, callback) {
-		db.setCount('followers:' + uid, callback);
+	User.getFollowers = function(uid, start, stop, callback) {
+		getFollow(uid, 'followers', start, stop, callback);
 	};
 
-	User.getFollowStats = function (uid, callback) {
-		async.parallel({
-			followingCount: function(next) {
-				User.getFollowingCount(uid, next);
-			},
-			followerCount : function(next) {
-				User.getFollowerCount(uid, next);
+	function getFollow(uid, type, start, stop, callback) {
+		if (!parseInt(uid, 10)) {
+			return callback(null, []);
+		}
+
+		db.getSortedSetRevRange(type + ':' + uid, start, stop, function(err, uids) {
+			if (err) {
+				return callback(err);
 			}
-		}, callback);
-	};
+
+			plugins.fireHook('filter:user.' + type, {
+				uids: uids,
+				uid: uid,
+				start: start,
+				stop: stop
+			}, function(err, data) {
+				User.getUsers(data.uids, uid, callback);
+			});
+		});
+	}
 
 	User.isFollowing = function(uid, theirid, callback) {
-		db.isSetMember('following:' + uid, theirid, callback);
+		if (!parseInt(uid, 10) || !parseInt(theirid, 10)) {
+			return callback(null, false);
+		}
+		db.isSortedSetMember('following:' + uid, theirid, callback);
 	};
 
 };

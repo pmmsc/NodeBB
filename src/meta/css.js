@@ -6,92 +6,195 @@ var winston = require('winston'),
 	path = require('path'),
 	less = require('less'),
 	crypto = require('crypto'),
+	async = require('async'),
 
 	plugins = require('../plugins'),
 	emitter = require('../emitter'),
-	db = require('../database');
+	db = require('../database'),
+	utils = require('../../public/src/utils');
 
 module.exports = function(Meta) {
 
-	Meta.css = {
-		'css-buster': +new Date()
-	};
+	Meta.css = {};
 	Meta.css.cache = undefined;
-	Meta.css.branding = {};
-	Meta.css.defaultBranding = {};
+	Meta.css.acpCache = undefined;
 
-	Meta.css.minify = function() {
-		winston.info('[meta/css] Minifying LESS/CSS');
+	Meta.css.minify = function(callback) {
+		callback = callback || function() {};
+		if (nconf.get('isPrimary') !== 'true') {
+			winston.verbose('[meta/css] Cluster worker ' + process.pid + ' skipping LESS/CSS compilation');
+			return callback();
+		}
+
+		winston.verbose('[meta/css] Minifying LESS/CSS');
 		db.getObjectFields('config', ['theme:type', 'theme:id'], function(err, themeData) {
-			var themeId = (themeData['theme:id'] || 'nodebb-theme-vanilla'),
+			if (err) {
+				return callback(err);
+			}
+
+			var themeId = (themeData['theme:id'] || 'nodebb-theme-persona'),
 				baseThemePath = path.join(nconf.get('themes_path'), (themeData['theme:type'] && themeData['theme:type'] === 'local' ? themeId : 'nodebb-theme-vanilla')),
 				paths = [
 					baseThemePath,
 					path.join(__dirname, '../../node_modules'),
-					path.join(__dirname, '../../public/vendor/fontawesome/less')
+					path.join(__dirname, '../../public/vendor/fontawesome/less'),
+					path.join(__dirname, '../../public/vendor/bootstrap/less')
 				],
-				source = '@import "./theme";\n@import "font-awesome";',
-				x;
-
+				source = '@import "font-awesome";';
 
 			plugins.lessFiles = filterMissingFiles(plugins.lessFiles);
-			for(x=0; x<plugins.lessFiles.length; ++x) {
-				source += '\n@import ".' + path.sep + plugins.lessFiles[x] + '";';
-			}
-
 			plugins.cssFiles = filterMissingFiles(plugins.cssFiles);
-			for(x=0; x<plugins.cssFiles.length; ++x) {
-				source += '\n@import (inline) ".' + path.sep + plugins.cssFiles[x] + '";';
-			}
 
-			source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/jquery/css/smoothness/jquery-ui-1.10.4.custom.min.css";';
-			source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/jquery/bootstrap-tagsinput/bootstrap-tagsinput.css";';
-
-			var	parser = new (less.Parser)({
-					paths: paths
-				});
-
-			parser.parse(source, function(err, tree) {
+			async.waterfall([
+				function(next) {
+					getStyleSource(plugins.lessFiles, '\n@import ".', '.less', next);
+				},
+				function(src, next) {
+					source += src;
+					getStyleSource(plugins.cssFiles, '\n@import (inline) ".', '.css', next);
+				},
+				function(src, next) {
+					source += src;
+					next();
+				}
+			], function(err) {
 				if (err) {
-					winston.error('[meta/css] Could not minify LESS/CSS: ' + err.message);
-					return;
+					return callback(err);
 				}
 
-				try {
-					var css = tree.toCSS({
-						cleancss: true
-					});
-				} catch (err) {
-					winston.error('[meta/css] Syntax Error: ' + err.message + ' - ' + path.basename(err.filename) + ' on line ' + err.line);
-					return;
-				}
+				source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/jquery/css/smoothness/jquery-ui-1.10.4.custom.min.css";';
+				source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/jquery/bootstrap-tagsinput/bootstrap-tagsinput.css";';
+				source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/jquery/textcomplete/jquery.textcomplete.css";';
+				source += '\n@import (inline) "..' + path.sep + '..' + path.sep + 'public/vendor/colorpicker/colorpicker.css";';
+				source += '\n@import "..' + path.sep + '..' + path.sep + 'public/less/generics.less";';
+				source += '\n@import "..' + path.sep + '..' + path.sep + 'public/less/mixins.less";';
 
+				var acpSource = '\n@import "..' + path.sep + 'public/less/admin/admin";\n' + source;
+				acpSource += '\n@import "..' + path.sep + 'public/less/generics.less";';
+				acpSource += '\n@import (inline) "..' + path.sep + 'public/vendor/colorpicker/colorpicker.css";';
 
-				Meta.css.cache = css;
+				source = '@import "./theme";\n' + source;
 
-				// Calculate css buster
-				var hasher = crypto.createHash('md5'),
-					hash;
-				hasher.update(css, 'utf-8');
-				hash = hasher.digest('hex').slice(0, 8);
-				Meta.css.hash = hash;
+				async.parallel([
+					function(next) {
+						minify(source, paths, 'cache', next);
+					},
+					function(next) {
+						minify(acpSource, paths, 'acpCache', next);
+					}
+				], function(err, minified) {
+					if (err) {
+						return callback(err);
+					}
 
-				var re = /.brand-([\S]*?)[ ]*?{[\s\S]*?color:([\S\s]*?)}/gi,
-					match = re.exec(css);
+					// Propagate to other workers
+					if (process.send) {
+						process.send({
+							action: 'css-propagate',
+							cache: minified[0],
+							acpCache: minified[1]
+						});
+					}
 
-				while (match && match.length > 1) {
-					Meta.css.branding[match[1]] = match[2];
-					match = re.exec(css);
-				}
+					emitter.emit('meta:css.compiled');
 
-				Meta.css.defaultBranding = Meta.css.branding;
-				Meta.css.updateBranding();
-
-				winston.info('[meta/css] Done.');
-				emitter.emit('meta:css.compiled');
+					callback();
+				});
 			});
 		});
 	};
+
+	function getStyleSource(files, prefix, extension, callback) {
+		var	pluginDirectories = [],
+			source = '';
+
+		files.forEach(function(styleFile) {
+			if (styleFile.endsWith(extension)) {
+				source += prefix + path.sep + styleFile + '";';
+			} else {
+				pluginDirectories.push(styleFile);
+			}
+		});
+
+		async.each(pluginDirectories, function(directory, next) {
+			utils.walk(directory, function(err, styleFiles) {
+				if (err) {
+					return next(err);
+				}
+
+				styleFiles.forEach(function(styleFile) {
+					source += prefix + path.sep + styleFile + '";';
+				});
+
+				next();
+			});
+		}, function(err) {
+			callback(err, source);
+		});
+	}
+
+	Meta.css.commitToFile = function(filename) {
+		var file = (filename === 'acpCache' ? 'admin' : 'stylesheet') + '.css';
+
+		fs.writeFile(path.join(__dirname, '../../public/' + file), Meta.css[filename], function(err) {
+			if (!err) {
+				winston.verbose('[meta/css] ' + file + ' committed to disk.');
+			} else {
+				winston.error('[meta/css] ' + err.message);
+				process.exit(0);
+			}
+		});
+	};
+
+	Meta.css.getFromFile = function(callback) {
+		var cachePath = path.join(__dirname, '../../public/stylesheet.css'),
+			acpCachePath = path.join(__dirname, '../../public/admin.css');
+		fs.exists(cachePath, function(exists) {
+			if (exists) {
+				if (nconf.get('isPrimary') === 'true') {
+					winston.verbose('[meta/css] Reading stylesheets from file');
+					async.map([cachePath, acpCachePath], fs.readFile, function(err, files) {
+						Meta.css.cache = files[0];
+						Meta.css.acpCache = files[1];
+
+						emitter.emit('meta:css.compiled');
+						callback();
+					});
+				} else {
+					callback();
+				}
+			} else {
+				winston.warn('[meta/css] No stylesheets found on disk, re-minifying');
+				Meta.css.minify.apply(Meta.css, arguments);
+			}
+		});
+	};
+
+	function minify(source, paths, destination, callback) {
+		less.render(source, {
+			paths: paths,
+			compress: true
+		}, function(err, lessOutput) {
+			if (err) {
+				winston.error('[meta/css] Could not minify LESS/CSS: ' + err.message);
+				if (typeof callback === 'function') {
+					callback(err);
+				}
+				return;
+			}
+
+			Meta.css[destination] = lessOutput.css;
+
+			// Save the compiled CSS in public/ so things like nginx can serve it
+			if (nconf.get('isPrimary') === 'true') {
+				Meta.css.commitToFile(destination);
+			}
+
+			if (typeof callback === 'function') {
+				callback(null, lessOutput.css);
+			}
+		});
+	}
 
 	function filterMissingFiles(files) {
 		return files.filter(function(file) {
@@ -102,19 +205,4 @@ module.exports = function(Meta) {
 			return exists;
 		});
 	}
-
-	Meta.css.updateBranding = function() {
-		var Settings = require('../settings');
-		var branding = new Settings('branding', '0', {}, function() {
-			branding = branding.cfg._;
-
-			for (var b in branding) {
-				if (branding.hasOwnProperty(b)) {
-					Meta.css.cache = Meta.css.cache.replace(new RegExp(Meta.css.branding[b], 'g'), branding[b]);
-				}
-			}
-
-			Meta.css.branding = branding;
-		});
-	};
 };

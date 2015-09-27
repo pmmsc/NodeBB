@@ -1,10 +1,21 @@
 {
-    "latest_users": "Usuários recentes",
-    "top_posters": "Quem mais posta",
-    "most_reputation": "Com mais reputação",
+    "latest_users": "Últimos Usuários",
+    "top_posters": "Principais Participantes",
+    "most_reputation": "Maior Reputação",
     "search": "Procurar",
-    "enter_username": "Digite um usuário para buscar",
-    "load_more": "Carregar mais",
-    "user-not-found": "Usuário não encontrado!",
-    "users-found-search-took": "%1 usuário(s) encontrado(s)! A pesquisa demorou %2 ms."
+    "enter_username": "Digite um nome de usuário para procurar",
+    "load_more": "Carregar Mais",
+    "users-found-search-took": "%1 usuário(s) encontrado(s)! A busca levou %2 segundos.",
+    "filter-by": "Filtrar Por",
+    "online-only": "Apenas Online",
+    "picture-only": "Apenas foto",
+    "invite": "Convidar",
+    "invitation-email-sent": "Um email de convite foi enviado para %1",
+    "user_list": "Lista de Usuários",
+    "recent_topics": "Tópicos Recentes",
+    "popular_topics": "Tópicos Populares",
+    "unread_topics": "Topicos Não-Lidos",
+    "categories": "Categorias",
+    "tags": "Tags",
+    "map": "Mapa"
 }

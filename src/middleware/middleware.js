@@ -1,122 +1,106 @@
 "use strict";
 
 var app,
-	middleware = {},
+	middleware = {
+		admin: {}
+	},
 	async = require('async'),
 	path = require('path'),
+	csrf = require('csurf'),
 	winston = require('winston'),
 	validator = require('validator'),
 	nconf = require('nconf'),
-	plugins = require('./../plugins'),
-	meta = require('./../meta'),
-	translator = require('./../../public/src/translator'),
-	user = require('./../user'),
-	db = require('./../database'),
-	categories = require('./../categories'),
-	topics = require('./../topics'),
+	ensureLoggedIn = require('connect-ensure-login'),
+
+	plugins = require('../plugins'),
+	navigation = require('../navigation'),
+	meta = require('../meta'),
+	translator = require('../../public/src/modules/translator'),
+	user = require('../user'),
+	groups = require('../groups'),
+	db = require('../database'),
+	categories = require('../categories'),
+	topics = require('../topics'),
 	messaging = require('../messaging'),
 
+	analytics = require('../analytics'),
+
 	controllers = {
-		api: require('./../controllers/api')
+		api: require('./../controllers/api'),
+		helpers: require('../controllers/helpers')
 	};
 
 middleware.authenticate = function(req, res, next) {
-	if(!req.user) {
-		if (res.locals.isAPI) {
-			return res.json(403, 'not-allowed');
+	if (req.user) {
+		return next();
+	} else if (plugins.hasListeners('action:middleware.authenticate')) {
+		return plugins.fireHook('action:middleware.authenticate', {
+			req: req,
+			res: res,
+			next: next
+		});
+	}
+
+	controllers.helpers.notAllowed(req, res);
+};
+
+middleware.applyCSRF = csrf();
+
+middleware.ensureLoggedIn = ensureLoggedIn.ensureLoggedIn(nconf.get('relative_path') + '/login');
+
+middleware.pageView = function(req, res, next) {
+	analytics.pageView(req.ip);
+
+	plugins.fireHook('action:middleware.pageView', {req: req});
+
+	if (req.user) {
+		user.updateLastOnlineTime(req.user.uid);
+		if (req.path.startsWith('/api/users') || req.path.startsWith('/users')) {
+			user.updateOnlineUsers(req.user.uid, next);
 		} else {
-			return res.redirect(nconf.get('url') + '/403');
+			user.updateOnlineUsers(req.user.uid);
+			next();
 		}
 	} else {
 		next();
 	}
 };
 
-middleware.updateLastOnlineTime = function(req, res, next) {
-	if(req.user) {
-		user.updateLastOnlineTime(req.user.uid);
-	}
-
-	db.sortedSetAdd('ip:recent', Date.now(), req.ip || 'Unknown');
-
-	next();
+middleware.pluginHooks = function(req, res, next) {
+	async.each(plugins.loadedHooks['filter:router.page'] || [], function(hookObj, next) {
+		hookObj.method(req, res, next);
+	}, function(req, res) {
+		// If it got here, then none of the subscribed hooks did anything, or there were no hooks
+		next();
+	});
 };
 
 middleware.redirectToAccountIfLoggedIn = function(req, res, next) {
-	if (req.user) {
-		user.getUserField(req.user.uid, 'userslug', function (err, userslug) {
-			if (res.locals.isAPI) {
-				return res.json(302, '/user/' + userslug);
-			} else {
-				res.redirect('/user/' + userslug);
-			}
-		});
-	} else {
-		next();
+	if (!req.user) {
+		return next();
 	}
+	user.getUserField(req.user.uid, 'userslug', function (err, userslug) {
+		if (err) {
+			return next(err);
+		}
+		controllers.helpers.redirect(res, '/user/' + userslug);
+	});
 };
 
-middleware.addSlug = function(req, res, next) {
-	function redirect(method, id, name) {
-		method(id, 'slug', function(err, slug) {
-			if (err || !slug || slug === id + '/') {
-				return next(err);
-			}
-			var url = name + encodeURI(slug);
-			res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		});
+middleware.redirectToLoginIfGuest = function(req, res, next) {
+	if (!req.user || parseInt(req.user.uid, 10) === 0) {
+		return redirectToLogin(req, res);
 	}
 
-	if (!req.params.slug) {
-		if (req.params.category_id) {
-			redirect(categories.getCategoryField, req.params.category_id, '/category/');
-		} else if (req.params.topic_id) {
-			redirect(topics.getTopicField, req.params.topic_id, '/topic/');
-		} else {
-			return next();
-		}
-		return;
-	}
 	next();
 };
 
-middleware.checkPostIndex = function(req, res, next) {
-	topics.getPostCount(req.params.topic_id, function(err, postCount) {
-		if (err) {
-			return next(err);
-		}
-		var postIndex = parseInt(req.params.post_index, 10);
-		postCount = parseInt(postCount, 10) + 1;
-		var url = '';
-		if (postIndex > postCount) {
-			url = '/topic/' + req.params.topic_id + '/' + req.params.slug + '/' + postCount;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		} else if (postIndex < 1) {
-			url = '/topic/' + req.params.topic_id + '/' + req.params.slug;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		}
-		next();
-	});
-};
+middleware.validateFiles = function(req, res, next) {
+	if (!Array.isArray(req.files.files) || !req.files.files.length) {
+		return next(new Error(['[[error:invalid-files]]']));
+	}
 
-middleware.checkTopicIndex = function(req, res, next) {
-	db.sortedSetCard('categories:' + req.params.category_id + ':tid', function(err, topicCount) {
-		if (err) {
-			return next(err);
-		}
-		var topicIndex = parseInt(req.params.topic_index, 10);
-		topicCount = parseInt(topicCount, 10) + 1;
-		var url = '';
-
-		if (topicIndex > topicCount) {
-			url = '/category/' + req.params.category_id + '/' + req.params.slug + '/' + topicCount;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		} else if (topicIndex < 1) {
-			url = '/category/' + req.params.category_id + '/' + req.params.slug;
-			return res.locals.isAPI ? res.json(302, url) : res.redirect(url);
-		}
-		next();
-	});
+	next();
 };
 
 middleware.prepareAPI = function(req, res, next) {
@@ -125,22 +109,16 @@ middleware.prepareAPI = function(req, res, next) {
 };
 
 middleware.guestSearchingAllowed = function(req, res, next) {
-	if (!req.user && meta.config.allowGuestSearching !== '1') {
-		return res.redirect('/403');
+	if (!req.user && parseInt(meta.config.allowGuestSearching, 10) !== 1) {
+		return controllers.helpers.notAllowed(req, res);
 	}
 
 	next();
 };
 
 middleware.checkGlobalPrivacySettings = function(req, res, next) {
-	var callerUID = req.user ? parseInt(req.user.uid, 10) : 0;
-
-	if (!callerUID && !!parseInt(meta.config.privateUserInfo, 10)) {
-		if (res.locals.isAPI) {
-			return res.json(403, 'not-allowed');
-		} else {
-			return res.redirect('login?next=' + req.url);
-		}
+	if (!req.user && !!parseInt(meta.config.privateUserInfo, 10)) {
+		return controllers.helpers.notAllowed(req, res);
 	}
 
 	next();
@@ -148,200 +126,180 @@ middleware.checkGlobalPrivacySettings = function(req, res, next) {
 
 middleware.checkAccountPermissions = function(req, res, next) {
 	// This middleware ensures that only the requested user and admins can pass
-	var callerUID = req.user ? parseInt(req.user.uid, 10) : 0;
+	async.waterfall([
+		function (next) {
+			middleware.authenticate(req, res, next);
+		},
+		function (next) {
+			user.getUidByUserslug(req.params.userslug, next);
+		},
+		function (uid, next) {
+			if (parseInt(uid, 10) === req.uid) {
+				return next(null, true);
+			}
 
-	if (callerUID === 0) {
-		return res.redirect('/login?next=' + req.url);
+			user.isAdministrator(req.uid, next);
+		}
+	], function (err, allowed) {
+		if (err || allowed) {
+			return next(err);
+		}
+		controllers.helpers.notAllowed(req, res);
+	});
+};
+
+middleware.isAdmin = function(req, res, next) {
+	if (!req.user) {
+		return redirectToLogin(req, res);
 	}
 
-	user.getUidByUserslug(req.params.userslug, function (err, uid) {
-		if (err) {
+	user.isAdministrator((req.user && req.user.uid) ? req.user.uid : 0, function (err, isAdmin) {
+		if (err || isAdmin) {
 			return next(err);
 		}
 
-		if (!uid) {
-			return res.locals.isAPI ? res.json(404, 'not-found') : res.redirect(nconf.get('relative_path') + '/404');
+		if (res.locals.isAPI) {
+			return controllers.helpers.notAllowed(req, res);
 		}
 
-		if (parseInt(uid, 10) === callerUID) {
-			return next();
-		}
-
-		user.isAdministrator(callerUID, function(err, isAdmin) {
-			if(err) {
-				return next(err);
-			}
-
-			if(isAdmin) {
-				return next();
-			}
-
-			res.locals.isAPI ? res.json(403, 'not-allowed') : res.redirect(nconf.get('relative_path') + '/403');
+		middleware.buildHeader(req, res, function() {
+			controllers.helpers.notAllowed(req, res);
 		});
 	});
 };
 
 middleware.buildHeader = function(req, res, next) {
 	res.locals.renderHeader = true;
-	async.parallel({
-		config: function(next) {
-			controllers.api.getConfig(req, res, next);
-		},
-		footer: function(next) {
-			app.render('footer', {}, next);
-		}
-	}, function(err, results) {
-		if (err) {
-			return next(err);
-		}
+	res.locals.isAPI = false;
 
-		res.locals.config = results.config;
+	middleware.applyCSRF(req, res, function() {
+		async.parallel({
+			config: function(next) {
+				controllers.api.getConfig(req, res, next);
+			},
+			footer: function(next) {
+				app.render('footer', {loggedIn: (req.user ? parseInt(req.user.uid, 10) !== 0 : false)}, next);
+			},
+			plugins: function(next) {
+				plugins.fireHook('filter:middleware.buildHeader', {req: req, locals: res.locals}, next);
+			}
+		}, function(err, results) {
+			if (err) {
+				return next(err);
+			}
 
-		translator.translate(results.footer, results.config.defaultLang, function(parsedTemplate) {
-			res.locals.footer = parsedTemplate;
-			next();
+			res.locals.config = results.config;
+
+			translator.translate(results.footer, results.config.defaultLang, function(parsedTemplate) {
+				res.locals.footer = parsedTemplate;
+				next();
+			});
 		});
 	});
 };
 
-middleware.renderHeader = function(req, res, callback) {
-	var uid = req.user ? parseInt(req.user.uid, 10) : 0;
-
-	var custom_header = {
-		uid: uid,
-		'navigation': []
+middleware.renderHeader = function(req, res, data, callback) {
+	var registrationType = meta.config.registrationType || 'normal';
+	var templateValues = {
+		bootswatchCSS: meta.config['theme:src'],
+		title: meta.config.title || '',
+		description: meta.config.description || '',
+		'cache-buster': meta.config['cache-buster'] ? 'v=' + meta.config['cache-buster'] : '',
+		'brand:logo': meta.config['brand:logo'] || '',
+		'brand:logo:url': meta.config['brand:logo:url'] || '',
+		'brand:logo:alt': meta.config['brand:logo:alt'] || '',
+		'brand:logo:display': meta.config['brand:logo']?'':'hide',
+		allowRegistration: registrationType === 'normal' || registrationType === 'admin-approval',
+		searchEnabled: plugins.hasListeners('filter:search.query'),
+		config: res.locals.config,
+		relative_path: nconf.get('relative_path')
 	};
 
-	plugins.fireHook('filter:header.build', custom_header, function(err, custom_header) {
-		var defaultMetaTags = [{
-				name: 'viewport',
-				content: 'width=device-width, initial-scale=1.0, user-scalable=no'
-			}, {
-				name: 'content-type',
-				content: 'text/html; charset=UTF-8'
-			}, {
-				name: 'apple-mobile-web-app-capable',
-				content: 'yes'
-			}, {
-				property: 'og:site_name',
-				content: meta.config.title || 'NodeBB'
-			}, {
-				name: 'keywords',
-				content: meta.config.keywords || ''
-			}, {
-				name: 'msapplication-badge',
-				content: 'frequency=30; polling-uri=' + nconf.get('url') + '/sitemap.xml'
-			}, {
-				name: 'msapplication-square150x150logo',
-				content: meta.config['brand:logo'] || ''
-			}],
-			defaultLinkTags = [{
-				rel: 'apple-touch-icon',
-				href: nconf.get('relative_path') + '/apple-touch-icon'
-			}],
-			templateValues = {
-				bootswatchCSS: meta.config['theme:src'],
-				title: meta.config.title || '',
-				description: meta.config.description || '',
-				'cache-buster': meta.config['cache-buster'] ? 'v=' + meta.config['cache-buster'] : '',
-				'brand:logo': meta.config['brand:logo'] || '',
-				'brand:logo:display': meta.config['brand:logo']?'':'hide',
-				csrf: res.locals.csrf_token,
-				navigation: custom_header.navigation,
-				allowRegistration: meta.config.allowRegistration === undefined || parseInt(meta.config.allowRegistration, 10) === 1,
-				searchEnabled: plugins.hasListeners('filter:search.query')
-			},
-			escapeList = {
-				'&': '&amp;',
-				'<': '&lt;',
-				'>': '&gt;',
-				"'": '&apos;',
-				'"': '&quot;'
-			};
+	templateValues.configJSON = JSON.stringify(res.locals.config);
 
-		for (var key in res.locals.config) {
-			if (res.locals.config.hasOwnProperty(key)) {
-				templateValues[key] = res.locals.config[key];
+	async.parallel({
+		customCSS: function(next) {
+			templateValues.useCustomCSS = parseInt(meta.config.useCustomCSS, 10) === 1;
+			if (!templateValues.useCustomCSS || !meta.config.customCSS || !meta.config.renderedCustomCSS) {
+				return next(null, '');
 			}
+			next(null, meta.config.renderedCustomCSS);
+		},
+		customJS: function(next) {
+			templateValues.useCustomJS = parseInt(meta.config.useCustomJS, 10) === 1;
+			next(null, templateValues.useCustomJS ? meta.config.customJS : '');
+		},
+		settings: function(next) {
+			if (req.uid) {
+				user.getSettings(req.uid, next);
+			} else {
+				next();
+			}
+		},
+		title: function(next) {
+			next(null, controllers.helpers.buildTitle(data.title));
+		},
+		isAdmin: function(next) {
+			user.isAdministrator(req.uid, next);
+		},
+		user: function(next) {
+			if (req.uid) {
+				user.getUserFields(req.uid, ['username', 'userslug', 'email', 'picture', 'status', 'email:confirmed', 'banned'], next);
+			} else {
+				next(null, {
+					username: '[[global:guest]]',
+					userslug: '',
+					picture: user.createGravatarURLFromEmail(''),
+					status: 'offline',
+					banned: false,
+					uid: 0
+				});
+			}
+		},
+		navigation: async.apply(navigation.get),
+		tags: async.apply(meta.tags.parse, res.locals.metaTags, res.locals.linkTags)
+	}, function(err, results) {
+		if (err) {
+			return callback(err);
 		}
 
-		templateValues.metaTags = defaultMetaTags.concat(res.locals.metaTags || []).map(function(tag) {
-			if(!tag || typeof tag.content !== 'string') {
-				winston.warn('Invalid meta tag. ', tag);
-				return tag;
-			}
+		if (results.user && parseInt(results.user.banned, 10) === 1) {
+			req.logout();
+			return res.redirect('/');
+		}
+		results.user.isAdmin = results.isAdmin || false;
+		results.user.uid = parseInt(results.user.uid, 10);
+		results.user['email:confirmed'] = parseInt(results.user['email:confirmed'], 10) === 1;
 
-			tag.content = tag.content.replace(/[&<>'"]/g, function(tag) {
-				return escapeList[tag] || tag;
-			});
-			return tag;
-		});
+		if (results.settings && results.settings.bootswatchSkin && results.settings.bootswatchSkin !== 'default') {
+			templateValues.bootswatchCSS = '//maxcdn.bootstrapcdn.com/bootswatch/latest/' + results.settings.bootswatchSkin + '/bootstrap.min.css';
+		}
 
-		templateValues.linkTags = defaultLinkTags.concat(res.locals.linkTags || []);
-		templateValues.linkTags.unshift({
-			rel: "icon",
-			type: "image/x-icon",
-			href: nconf.get('relative_path') + '/favicon.ico'
-		});
+		templateValues.browserTitle = results.title;
+		templateValues.navigation = results.navigation;
+		templateValues.metaTags = results.tags.meta;
+		templateValues.linkTags = results.tags.link;
+		templateValues.isAdmin = results.user.isAdmin;
+		templateValues.user = results.user;
+		templateValues.userJSON = JSON.stringify(results.user);
+		templateValues.customCSS = results.customCSS;
+		templateValues.customJS = results.customJS;
+		templateValues.maintenanceHeader = parseInt(meta.config.maintenanceMode, 10) === 1 && !results.isAdmin;
+		templateValues.defaultLang = meta.config.defaultLang || 'en_GB';
 
+		templateValues.template = {name: res.locals.template};
+		templateValues.template[res.locals.template] = true;
 
-		async.parallel({
-			customCSS: function(next) {
-				templateValues.useCustomCSS = parseInt(meta.config.useCustomCSS, 10) === 1;
-				if (!templateValues.useCustomCSS) {
-					return next(null, '');
-				}
+		if (req.route && req.route.path === '/') {
+			modifyTitle(templateValues);
+		}
 
-				var less = require('less');
-				var parser = new (less.Parser)();
-
-				parser.parse(meta.config.customCSS, function(err, tree) {
-					if (!err) {
-						next(err, tree ? tree.toCSS({cleancss: true}) : '');
-					} else {
-						winston.error('[less] Could not convert custom LESS to CSS! Please check your syntax.');
-						next(undefined, '');
-					}
-				});
-			},
-			customJS: function(next) {
-				templateValues.useCustomJS = parseInt(meta.config.useCustomJS, 10) === 1;
-				next(null, templateValues.useCustomJS ? meta.config.customJS : '');
-			},
-			title: function(next) {
-				if (uid) {
-					user.getSettings(uid, function(err, settings) {
-						if (err) {
-							return next(err);
-						}
-						meta.title.build(req.url.slice(1), settings.language, next);
-					});
-				} else {
-					meta.title.build(req.url.slice(1), meta.config.defaultLang, next);
-				}
-			},
-			isAdmin: function(next) {
-				user.isAdministrator(uid, next);
-			},
-			user: function(next) {
-				if (uid) {
-					user.getUserFields(uid, ['username', 'userslug', 'picture', 'status'], next);
-				} else {
-					next();
-				}
-			}
-		}, function(err, results) {
+		plugins.fireHook('filter:middleware.renderHeader', {templateValues: templateValues, req: req, res: res}, function(err, data) {
 			if (err) {
 				return callback(err);
 			}
 
-			templateValues.browserTitle = results.title;
-			templateValues.isAdmin = results.isAdmin || false;
-			templateValues.user = results.user;
-			templateValues.customCSS = results.customCSS;
-			templateValues.customJS = results.customJS;
-
-			app.render('header', templateValues, callback);
+			app.render('header', data.templateValues, callback);
 		});
 	});
 };
@@ -360,7 +318,6 @@ middleware.processRender = function(req, res, next) {
 
 				self.send(str);
 			};
-
 		options = options || {};
 
 		if ('function' === typeof options) {
@@ -369,16 +326,31 @@ middleware.processRender = function(req, res, next) {
 		}
 
 		options.loggedIn = req.user ? parseInt(req.user.uid, 10) !== 0 : false;
+		options.relative_path = nconf.get('relative_path');
+		options.template = {name: template};
+		options.template[template] = true;
+		res.locals.template = template;
 
 		if ('function' !== typeof fn) {
 			fn = defaultFn;
 		}
 
 		if (res.locals.isAPI) {
+			if (req.route && req.route.path === '/api/') {
+				options.title = '[[pages:home]]';
+			}
+
 			return res.json(options);
 		}
 
+		var ajaxifyData = encodeURIComponent(JSON.stringify(options));
 		render.call(self, template, options, function(err, str) {
+			if (err) {
+				winston.error(err);
+				return fn(err);
+			}
+
+			str = str + '<input type="hidden" ajaxify-data="' + ajaxifyData + '" />';
 			str = (res.locals.postHeader ? res.locals.postHeader : '') + str + (res.locals.preFooter ? res.locals.preFooter : '');
 
 			if (res.locals.footer) {
@@ -387,17 +359,19 @@ middleware.processRender = function(req, res, next) {
 				str = str + res.locals.adminFooter;
 			}
 
-			if (res.locals.renderHeader) {
-				middleware.renderHeader(req, res, function(err, template) {
+			if (res.locals.renderHeader || res.locals.renderAdminHeader) {
+				var method = res.locals.renderHeader ? middleware.renderHeader : middleware.admin.renderHeader;
+				method(req, res, options, function(err, template) {
+					if (err) {
+						return fn(err);
+					}
 					str = template + str;
-
-					translator.translate(str, res.locals.config.defaultLang, function(translated) {
+					var language = res.locals.config ? res.locals.config.userLang || 'en_GB' : 'en_GB';
+					language = req.query.lang || language;
+					translator.translate(str, language, function(translated) {
 						fn(err, translated);
 					});
 				});
-			} else if (res.locals.adminHeader) {
-				str = res.locals.adminHeader + str;
-				fn(err, str);
 			} else {
 				fn(err, str);
 			}
@@ -411,7 +385,7 @@ middleware.routeTouchIcon = function(req, res) {
 	if (meta.config['brand:logo'] && validator.isURL(meta.config['brand:logo'])) {
 		return res.redirect(meta.config['brand:logo']);
 	} else {
-		return res.sendfile(path.join(__dirname, '../../public', meta.config['brand:logo'] || '/logo.png'), {
+		return res.sendFile(path.join(__dirname, '../../public', meta.config['brand:logo'] || '/logo.png'), {
 			maxAge: app.enabled('cache') ? 5184000000 : 0
 		});
 	}
@@ -421,14 +395,87 @@ middleware.addExpiresHeaders = function(req, res, next) {
 	if (app.enabled('cache')) {
 		res.setHeader("Cache-Control", "public, max-age=5184000");
 		res.setHeader("Expires", new Date(Date.now() + 5184000000).toUTCString());
+	} else {
+		res.setHeader("Cache-Control", "public, max-age=0");
+		res.setHeader("Expires", new Date().toUTCString());
 	}
 
 	next();
 };
 
+
+
+middleware.privateTagListing = function(req, res, next) {
+	if (!req.user && parseInt(meta.config.privateTagListing, 10) === 1) {
+		controllers.helpers.notAllowed(req, res);
+	} else {
+		next();
+	}
+};
+
+middleware.exposeGroupName = function(req, res, next) {
+	if (!req.params.hasOwnProperty('slug')) { return next(); }
+
+	groups.getGroupNameByGroupSlug(req.params.slug, function(err, groupName) {
+		if (err) {
+			return next(err);
+		}
+
+		res.locals.groupName = groupName;
+		next();
+	});
+};
+
+middleware.exposeUid = function(req, res, next) {
+	if (req.params.hasOwnProperty('userslug')) {
+		user.getUidByUserslug(req.params.userslug, function(err, uid) {
+			if (err) {
+				return next(err);
+			}
+
+			res.locals.uid = uid;
+			next();
+		});
+	} else {
+		next();
+	}
+};
+
+middleware.requireUser = function(req, res, next) {
+	if (req.user) {
+		return next();
+	}
+
+	res.render('403', {title: '[[global:403.title]]'});
+};
+
+function redirectToLogin(req, res) {
+	req.session.returnTo = nconf.get('relative_path') + req.url.replace(/^\/api/, '');
+	return controllers.helpers.redirect(res, '/login');
+}
+
+
+
+function modifyTitle(obj) {
+	var title = controllers.helpers.buildTitle('[[pages:home]]');
+	obj.browserTitle = title;
+
+	if (obj.metaTags) {
+		obj.metaTags.forEach(function(tag, i) {
+			if (tag.property === 'og:title') {
+				obj.metaTags[i].content = title;
+			}
+		});
+	}
+
+	return title;
+}
+
 module.exports = function(webserver) {
 	app = webserver;
 	middleware.admin = require('./admin')(webserver);
+
+	require('./maintenance')(middleware);
 
 	return middleware;
 };

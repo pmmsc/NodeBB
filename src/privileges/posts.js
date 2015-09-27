@@ -2,67 +2,53 @@
 'use strict';
 
 var async = require('async'),
+	winston = require('winston'),
 
+	meta = require('../meta'),
 	posts = require('../posts'),
 	topics = require('../topics'),
 	user = require('../user'),
 	helpers = require('./helpers'),
 	groups = require('../groups'),
-	categories = require('../categories');
+	categories = require('../categories'),
+	plugins = require('../plugins');
 
 module.exports = function(privileges) {
 
 	privileges.posts = {};
 
 	privileges.posts.get = function(pids, uid, callback) {
+		if (!Array.isArray(pids) || !pids.length) {
+			return callback(null, []);
+		}
 
 		async.parallel({
-			manage_content: function(next) {
-				helpers.hasEnoughReputationFor('privileges:manage_content', uid, next);
-			},
-			manage_topic: function(next) {
-				helpers.hasEnoughReputationFor('privileges:manage_topic', uid, next);
-			},
-			isAdministrator: function(next) {
+			isAdmin: function(next){
 				user.isAdministrator(uid, next);
 			},
-		}, function(err, userResults) {
-			if(err) {
+			isModerator: function(next) {
+				posts.isModerator(pids, uid, next);
+			},
+			isOwner: function(next) {
+				posts.isOwner(pids, uid, next);
+			}
+		}, function(err, results) {
+			if (err) {
 				return callback(err);
 			}
 
-			var userPriv = userResults.isAdministrator || userResults.manage_topic || userResults.manage_content;
+			var privileges = [];
 
-			async.parallel({
-				isOwner: function(next) {
-					posts.isOwner(pids, uid, next);
-				},
-				isModerator: function(next) {
-					posts.getCidsByPids(pids, function(err, cids) {
-						if (err) {
-							return next(err);
-						}
-						user.isModerator(uid, cids, next);
-					});
-				}
-			}, function(err, postResults) {
-				if (err) {
-					return callback(err);
-				}
+			for (var i=0; i<pids.length; ++i) {
+				var editable = results.isAdmin || results.isModerator[i] || results.isOwner[i];
+				privileges.push({
+					editable: editable,
+					view_deleted: editable,
+					move: results.isAdmin || results.isModerator[i]
+				});
+			}
 
-				var privileges = [];
-
-				for (var i=0; i<pids.length; ++i) {
-					var editable = userPriv || postResults.isModerator[i] || postResults.isOwner[i];
-					privileges.push({
-						editable: editable,
-						view_deleted: editable,
-						move: userResults.isAdministrator || postResults.isModerator[i]
-					});
-				}
-
-				callback(null, privileges);
-			});
+			callback(null, privileges);
 		});
 	};
 
@@ -77,7 +63,7 @@ module.exports = function(privileges) {
 	};
 
 	privileges.posts.filter = function(privilege, pids, uid, callback) {
-		if (!pids.length) {
+		if (!Array.isArray(pids) || !pids.length) {
 			return callback(null, []);
 		}
 		posts.getCidsByPids(pids, function(err, cids) {
@@ -89,7 +75,7 @@ module.exports = function(privileges) {
 				return {pid: pid, cid: cids[index]};
 			});
 
-			privileges.categories.filter(privilege, cids, uid, function(err, cids) {
+			privileges.categories.filterCids(privilege, cids, uid, function(err, cids) {
 				if (err) {
 					return callback(err);
 				}
@@ -99,36 +85,37 @@ module.exports = function(privileges) {
 				}).map(function(post) {
 					return post.pid;
 				});
-				callback(null, pids);
+
+				plugins.fireHook('filter:privileges.posts.filter', {
+					privilege: privilege,
+					uid: uid,
+					pids: pids
+				},  function(err, data) {
+					callback(err, data ? data.pids : null);
+				});
 			});
 		});
 	};
 
 	privileges.posts.canEdit = function(pid, uid, callback) {
-		helpers.some([
-			function(next) {
-				isPostTopicLocked(pid, function(err, isLocked) {
-					if (err || isLocked) {
-						return next(err, false);
-					}
-
-					helpers.some([
-						function(next) {
-							posts.isOwner(pid, uid, next);
-						},
-						function(next) {
-							helpers.hasEnoughReputationFor('privileges:manage_content', uid, next);
-						},
-						function(next) {
-							helpers.hasEnoughReputationFor('privileges:manage_topic', uid, next);
-						}
-					], next);
-				});
-			},
-			function(next) {
-				isAdminOrMod(pid, uid, next);
+		async.parallel({
+			isEditable: async.apply(isPostEditable, pid, uid),
+			isAdminOrMod: async.apply(isAdminOrMod, pid, uid)
+		}, function(err, results) {
+			if (err) {
+				return callback(err);
 			}
-		], callback);
+			if (results.isAdminOrMod) {
+				return callback(null, true);
+			}
+			if (results.isEditable.isLocked) {
+				return callback(new Error('[[error:topic-locked]]'));
+			}
+			if (results.isEditable.isEditExpired) {
+				return callback(new Error('[[error:post-edit-duration-expired, ' + meta.config.postEditDuration + ']]'));
+			}
+			callback(null, results.isEditable.editable);
+		});
 	};
 
 	privileges.posts.canMove = function(pid, uid, callback) {
@@ -139,6 +126,49 @@ module.exports = function(privileges) {
 			isAdminOrMod(pid, uid, callback);
 		});
 	};
+
+	privileges.posts.canPurge = function(pid, uid, callback) {
+		async.waterfall([
+			function (next) {
+				posts.getCidByPid(pid, next);
+			},
+			function (cid, next) {
+				async.parallel({
+					purge: async.apply(privileges.categories.isUserAllowedTo, 'purge', cid, uid),
+					owner: async.apply(posts.isOwner, pid, uid),
+					isAdminOrMod: async.apply(privileges.categories.isAdminOrMod, cid, uid)
+				}, next);
+			},
+			function (results, next) {
+				next(null, results.isAdminOrMod || (results.purge && results.owner));
+			}
+		], callback);
+	};
+
+	function isPostEditable(pid, uid, callback) {
+		async.waterfall([
+			function(next) {
+				posts.getPostFields(pid, ['tid', 'timestamp'], next);
+			},
+			function(postData, next) {
+				var postEditDuration = parseInt(meta.config.postEditDuration, 10);
+				if (postEditDuration && Date.now() - parseInt(postData.timestamp, 10) > postEditDuration * 1000) {
+					return callback(null, {isEditExpired: true});
+				}
+				topics.isLocked(postData.tid, next);
+			},
+			function(isLocked, next) {
+				if (isLocked) {
+					return callback(null, {isLocked: true});
+				}
+
+				posts.isOwner(pid, uid, next);
+			},
+			function(isOwner, next) {
+				next(null, {editable: isOwner});
+			}
+		], callback);
+	}
 
 	function isPostTopicLocked(pid, callback) {
 		posts.getPostField(pid, 'tid', function(err, tid) {
@@ -153,9 +183,10 @@ module.exports = function(privileges) {
 		helpers.some([
 			function(next) {
 				posts.getCidByPid(pid, function(err, cid) {
-					if (err) {
-						return next(err);
+					if (err || !cid) {
+						return next(err, false);
 					}
+
 					user.isModerator(uid, cid, next);
 				});
 			},

@@ -1,7 +1,10 @@
+'use strict';
+/*global require, before, after*/
+
 var	assert = require('assert'),
 	async = require('async'),
 
-	db = require('../mocks/databasemock'),
+	db = require('./mocks/databasemock'),
 	Groups = require('../src/groups'),
 	User = require('../src/user');
 
@@ -10,14 +13,17 @@ describe('Groups', function() {
 		async.parallel([
 			function(next) {
 				// Create a group to play around with
-				Groups.create('Test', 'Foobar!', next);
+				Groups.create({
+					name: 'Test',
+					description: 'Foobar!'
+				}, next);
 			},
 			function(next) {
 				// Create a new user
-					User.create({
+				User.create({
 					username: 'testuser',
 					email: 'b@c.com'
-				}, done);
+				}, next);
 			},
 			function(next) {
 				// Also create a hidden group
@@ -28,10 +34,10 @@ describe('Groups', function() {
 
 	describe('.list()', function() {
 		it('should list the groups present', function(done) {
-			Groups.list({}, function(err, groups) {
+			Groups.getGroupsFromSet('groups:createtime', 0, 0, -1, function(err, groups) {
 				if (err) return done(err);
 
-				assert.equal(groups.length, 1);
+				assert.equal(groups.length, 3);
 				done();
 			});
 		});
@@ -51,21 +57,6 @@ describe('Groups', function() {
 				assert.strictEqual(groupObj.name, 'Test');
 				assert.strictEqual(groupObj.description, 'Foobar!');
 				assert.strictEqual(groupObj.memberCount, 1);
-				assert.notEqual(typeof groupObj.members[0], 'object');
-
-				done();
-			});
-		});
-
-		it('with the "expand" option, should show both group information and user information', function(done) {
-			Groups.get('Test', { expand: true }, function(err, groupObj) {
-				if (err) return done(err);
-
-				assert.equal(typeof groupObj, 'object');
-				assert(Array.isArray(groupObj.members));
-				assert.strictEqual(groupObj.name, 'Test');
-				assert.strictEqual(groupObj.description, 'Foobar!');
-				assert.strictEqual(groupObj.memberCount, 1);
 				assert.equal(typeof groupObj.members[0], 'object');
 
 				done();
@@ -76,18 +67,9 @@ describe('Groups', function() {
 	describe('.search()', function() {
 		it('should return the "Test" group when searched for', function(done) {
 			Groups.search('test', {}, function(err, groups) {
+				if (err) return done(err);
 				assert.equal(1, groups.length);
 				assert.strictEqual('Test', groups[0].name);
-				done();
-			});
-		});
-
-		it('should return the "Hidden" group when "showAllGroups" option is passed in', function(done) {
-			Groups.search('hidden', {
-				showAllGroups: true
-			}, function(err, groups) {
-				assert.equal(1, groups.length);
-				assert.strictEqual('Hidden', groups[0].name);
 				done();
 			});
 		});
@@ -161,7 +143,10 @@ describe('Groups', function() {
 
 	describe('.create()', function() {
 		it('should create another group', function(done) {
-			Groups.create('foo', 'bar', function(err) {
+			Groups.create({
+				name: 'foo',
+				description: 'bar'
+			}, function(err) {
 				if (err) return done(err);
 
 				Groups.get('foo', {}, done);
@@ -186,16 +171,42 @@ describe('Groups', function() {
 	});
 
 	describe('.update()', function() {
+		before(function(done) {
+			Groups.create({
+				name: 'updateTestGroup',
+				description: 'bar',
+				system: 0,
+				hidden: 0
+			}, done);
+		});
+
 		it('should change an aspect of a group', function(done) {
-			Groups.update('foo', {
+			Groups.update('updateTestGroup', {
 				description: 'baz'
 			}, function(err) {
 				if (err) return done(err);
 
-				Groups.get('foo', {}, function(err, groupObj) {
+				Groups.get('updateTestGroup', {}, function(err, groupObj) {
 					if (err) return done(err);
 
 					assert.strictEqual('baz', groupObj.description);
+
+					done();
+				});
+			});
+		});
+
+		it('should rename a group if the name was updated', function(done) {
+			Groups.update('updateTestGroup', {
+				name: 'updateTestGroup?'
+			}, function(err) {
+				if (err) return done(err);
+
+				Groups.get('updateTestGroup?', {}, function(err, groupObj) {
+					if (err) return done(err);
+
+					assert.strictEqual('updateTestGroup?', groupObj.name);
+					assert.strictEqual('updatetestgroup', groupObj.slug);
 
 					done();
 				});
@@ -205,16 +216,15 @@ describe('Groups', function() {
 
 	describe('.destroy()', function() {
 		before(function(done) {
-			Groups.join('foo', 1, done);
+			Groups.join('foobar?', 1, done);
 		});
 
 		it('should destroy a group', function(done) {
-			Groups.destroy('foo', function(err) {
+			Groups.destroy('foobar?', function(err) {
 				if (err) return done(err);
 
-				Groups.get('foo', {}, function(err, groupObj) {
-					assert(err);
-					assert.strictEqual(undefined, groupObj);
+				Groups.get('foobar?', {}, function(err) {
+					assert(err, 'Group still exists!');
 
 					done();
 				});
@@ -284,5 +294,9 @@ describe('Groups', function() {
 				});
 			});
 		});
+	});
+
+	after(function() {
+		db.flushdb();
 	});
 });
