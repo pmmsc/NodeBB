@@ -1,108 +1,139 @@
 
 'use strict';
 
-var bcrypt = require('bcryptjs'),
-	async = require('async'),
+var async = require('async'),
 	validator = require('validator'),
+	url = require('url'),
 	S = require('string'),
 
-	utils = require('./../../public/src/utils'),
-	meta = require('./../meta'),
-	events = require('./../events'),
-	db = require('./../database');
+	utils = require('../../public/src/utils'),
+	meta = require('../meta'),
+	events = require('../events'),
+	db = require('../database'),
+	Password = require('../password'),
+	plugins = require('../plugins');
 
 module.exports = function(User) {
 
 	User.updateProfile = function(uid, data, callback) {
-		var fields = ['username', 'email', 'fullname', 'website', 'location', 'birthday', 'signature'];
+		var fields = ['username', 'email', 'fullname', 'website', 'location', 'birthday', 'signature', 'aboutme'];
 
-		function isSignatureValid(next) {
-			if (data.signature !== undefined && data.signature.length > meta.config.maximumSignatureLength) {
-				next(new Error('[[error:signature-too-long, ' + meta.config.maximumSignatureLength + ']]'));
-			} else {
-				next();
-			}
-		}
-
-		function isEmailAvailable(next) {
-			if (!data.email) {
-				return next();
-			}
-
-			User.getUserField(uid, 'email', function(err, email) {
-				if(email === data.email) {
-					return next();
-				}
-
-				User.email.available(data.email, function(err, available) {
-					if (err) {
-						return next(err);
-					}
-
-					next(!available ? new Error('[[error:email-taken]]') : null);
-				});
-			});
-		}
-
-		function isUsernameAvailable(next) {
-			User.getUserFields(uid, ['username', 'userslug'], function(err, userData) {
-
-				var userslug = utils.slugify(data.username);
-
-				if(userslug === userData.userslug) {
-					return next();
-				}
-
-				if(!utils.isUserNameValid(data.username) || !userslug) {
-					return next(new Error('[[error:invalid-username]]'));
-				}
-
-				User.exists(userslug, function(err, exists) {
-					if(err) {
-						return next(err);
-					}
-
-					next(exists ? new Error('[[error:username-taken]]') : null);
-				});
-			});
-		}
-
-		async.series([isSignatureValid, isEmailAvailable, isUsernameAvailable], function(err, results) {
+		plugins.fireHook('filter:user.updateProfile', {uid: uid, data: data, fields: fields}, function(err, data) {
 			if (err) {
 				return callback(err);
 			}
 
-			async.each(fields, updateField, function(err) {
+			fields = data.fields;
+			data = data.data;
+
+			function isAboutMeValid(next) {
+				if (data.aboutme !== undefined && data.aboutme.length > meta.config.maximumAboutMeLength) {
+					next(new Error('[[error:about-me-too-long, ' + meta.config.maximumAboutMeLength + ']]'));
+				} else {
+					next();
+				}
+			}
+
+			function isSignatureValid(next) {
+				if (data.signature !== undefined && data.signature.length > meta.config.maximumSignatureLength) {
+					next(new Error('[[error:signature-too-long, ' + meta.config.maximumSignatureLength + ']]'));
+				} else {
+					next();
+				}
+			}
+
+			function isEmailAvailable(next) {
+				if (!data.email) {
+					return next();
+				}
+
+				if (!utils.isEmailValid(data.email)) {
+					return next(new Error('[[error:invalid-email]]'));
+				}
+
+				User.getUserField(uid, 'email', function(err, email) {
+					if(email === data.email) {
+						return next();
+					}
+
+					User.email.available(data.email, function(err, available) {
+						if (err) {
+							return next(err);
+						}
+
+						next(!available ? new Error('[[error:email-taken]]') : null);
+					});
+				});
+			}
+
+			function isUsernameAvailable(next) {
+				if (!data.username) {
+					return next();
+				}
+				User.getUserFields(uid, ['username', 'userslug'], function(err, userData) {
+
+					var userslug = utils.slugify(data.username);
+
+					if(userslug === userData.userslug) {
+						return next();
+					}
+
+					if (data.username.length < meta.config.minimumUsernameLength) {
+						return next(new Error('[[error:username-too-short]]'));
+					}
+
+					if (data.username.length > meta.config.maximumUsernameLength) {
+						return next(new Error('[[error:username-too-long]]'));
+					}
+
+					if(!utils.isUserNameValid(data.username) || !userslug) {
+						return next(new Error('[[error:invalid-username]]'));
+					}
+
+					User.exists(userslug, function(err, exists) {
+						if(err) {
+							return next(err);
+						}
+
+						next(exists ? new Error('[[error:username-taken]]') : null);
+					});
+				});
+			}
+
+			async.series([isAboutMeValid, isSignatureValid, isEmailAvailable, isUsernameAvailable], function(err) {
 				if (err) {
 					return callback(err);
 				}
 
-				User.getUserFields(uid, ['email', 'userslug', 'picture', 'gravatarpicture'], callback);
+				async.each(fields, updateField, function(err) {
+					if (err) {
+						return callback(err);
+					}
+					plugins.fireHook('action:user.updateProfile', {data: data, uid: uid});
+					User.getUserFields(uid, ['email', 'username', 'userslug', 'picture', 'gravatarpicture'], callback);
+				});
 			});
-		});
 
-		function updateField(field, next) {
-			if (!(data[field] !== undefined && typeof data[field] === 'string')) {
-				return next();
-			}
-
-			data[field] = data[field].trim();
-			data[field] = validator.escape(data[field]);
-
-			if (field === 'email') {
-				return updateEmail(uid, data.email, next);
-			} else if (field === 'username') {
-				return updateUsername(uid, data.username, next);
-			} else if (field === 'signature') {
-				data[field] = S(data[field]).stripTags().s;
-			} else if (field === 'website') {
-				if(data[field].substr(0, 7) !== 'http://' && data[field].substr(0, 8) !== 'https://') {
-					data[field] = 'http://' + data[field];
+			function updateField(field, next) {
+				if (!(data[field] !== undefined && typeof data[field] === 'string')) {
+					return next();
 				}
-			}
 
-			User.setUserField(uid, field, data[field], next);
-		}
+				data[field] = data[field].trim();
+
+				if (field === 'email') {
+					return updateEmail(uid, data.email, next);
+				} else if (field === 'username') {
+					return updateUsername(uid, data.username, next);
+				} else if (field === 'fullname') {
+					return updateFullname(uid, data.fullname, next);
+				} else if (field === 'signature') {
+					data[field] = S(data[field]).stripTags().s;
+				}
+
+				User.setUserField(uid, field, data[field], next);
+			}
+		});
 	};
 
 	function updateEmail(uid, newEmail, callback) {
@@ -111,16 +142,18 @@ module.exports = function(User) {
 				return callback(err);
 			}
 
+			userData.email = userData.email || '';
+
 			if (userData.email === newEmail) {
 				return callback();
 			}
-
-			db.deleteObjectField('email:uid', userData.email.toLowerCase(), function(err) {
+			async.series([
+				async.apply(db.sortedSetRemove, 'email:uid', userData.email.toLowerCase()),
+				async.apply(db.sortedSetRemove, 'email:sorted', userData.email.toLowerCase() + ':' + uid)
+			], function(err) {
 				if (err) {
 					return callback(err);
 				}
-
-				events.logEmailChange(uid, userData.email, newEmail);
 
 				var gravatarpicture = User.createGravatarURLFromEmail(newEmail);
 				async.parallel([
@@ -128,14 +161,17 @@ module.exports = function(User) {
 						User.setUserField(uid, 'gravatarpicture', gravatarpicture, next);
 					},
 					function(next) {
-						db.setObjectField('email:uid', newEmail.toLowerCase(), uid, next);
+						db.sortedSetAdd('email:uid', uid, newEmail.toLowerCase(), next);
+					},
+					function(next) {
+						db.sortedSetAdd('email:sorted',  0, newEmail.toLowerCase() + ':' + uid, next);
 					},
 					function(next) {
 						User.setUserField(uid, 'email', newEmail, next);
 					},
 					function(next) {
-						if (parseInt(meta.config.requireEmailConfirmation, 10) === 1) {
-							User.email.verify(uid, newEmail);
+						if (parseInt(meta.config.requireEmailConfirmation, 10) === 1 && newEmail) {
+							User.email.sendValidationEmail(uid, newEmail);
 						}
 						User.setUserField(uid, 'email:confirmed', 0, next);
 					},
@@ -152,77 +188,81 @@ module.exports = function(User) {
 	}
 
 	function updateUsername(uid, newUsername, callback) {
-		User.getUserFields(uid, ['username', 'userslug'], function(err, userData) {
-			function update(field, object, value, callback) {
-				async.parallel([
-					function(next) {
-						User.setUserField(uid, field, value, next);
-					},
-					function(next) {
-						db.setObjectField(object, value, uid, next);
-					}
-				], callback);
-			}
+		if (!newUsername) {
+			return callback();
+		}
 
+		User.getUserFields(uid, ['username', 'userslug'], function(err, userData) {
 			if (err) {
 				return callback(err);
 			}
-			var userslug = utils.slugify(newUsername);
 
 			async.parallel([
 				function(next) {
-					if (newUsername === userData.username) {
-						return next();
-					}
-
-					db.deleteObjectField('username:uid', userData.username, function(err) {
-						if (err) {
-							return next(err);
-						}
-						events.logUsernameChange(uid, userData.username, newUsername);
-						update('username', 'username:uid', newUsername, next);
-					});
+					updateUidMapping('username', uid, newUsername, userData.username, next);
 				},
 				function(next) {
-					if (userslug === userData.userslug) {
-						return next();
-					}
-
-					db.deleteObjectField('userslug:uid', userData.userslug, function(err) {
-						if (err) {
-							return next(err);
-						}
-						update('userslug', 'userslug:uid', userslug, next);
-					});
-				}
+					var newUserslug = utils.slugify(newUsername);
+					updateUidMapping('userslug', uid, newUserslug, userData.userslug, next);
+				},
+				function(next) {
+					async.series([
+						async.apply(db.sortedSetRemove, 'username:sorted', userData.username.toLowerCase() + ':' + uid),
+						async.apply(db.sortedSetAdd, 'username:sorted', 0, newUsername.toLowerCase() + ':' + uid)
+					], next);
+				},
 			], callback);
 		});
 	}
 
+	function updateUidMapping(field, uid, value, oldValue, callback) {
+		if (value === oldValue) {
+			return callback();
+		}
+
+		async.series([
+			function(next) {
+				db.sortedSetRemove(field + ':uid', oldValue, next);
+			},
+			function(next) {
+				User.setUserField(uid, field, value, next);
+			},
+			function(next) {
+				if (value) {
+					db.sortedSetAdd(field + ':uid', uid, value, next);
+				} else {
+					next();
+				}
+			}
+		], callback);
+	}
+
+	function updateFullname(uid, newFullname, callback) {
+		async.waterfall([
+			function(next) {
+				User.getUserField(uid, 'fullname', next);
+			},
+			function(fullname, next) {
+				updateUidMapping('fullname', uid, newFullname, fullname, next);
+			}
+		], callback);
+	}
+
 	User.changePassword = function(uid, data, callback) {
-		if(!data || !data.uid) {
+		if (!uid || !data || !data.uid) {
 			return callback(new Error('[[error:invalid-uid]]'));
 		}
 
 		function hashAndSetPassword(callback) {
 			User.hashPassword(data.newPassword, function(err, hash) {
-				if(err) {
+				if (err) {
 					return callback(err);
 				}
 
-				User.setUserField(data.uid, 'password', hash, function(err) {
-					if(err) {
-						return callback(err);
-					}
-
-					if(parseInt(uid, 10) === parseInt(data.uid, 10)) {
-						events.logPasswordChange(data.uid);
-					} else {
-						events.logAdminChangeUserPassword(uid, data.uid);
-					}
-
-					callback();
-				});
+				async.parallel([
+					async.apply(User.setUserField, data.uid, 'password', hash),
+					async.apply(User.reset.updateExpiry, data.uid)
+				], callback);
 			});
 		}
 
@@ -248,7 +288,7 @@ module.exports = function(User) {
 					return hashAndSetPassword(callback);
 				}
 
-				bcrypt.compare(data.currentPassword, currentPassword, function(err, res) {
+				Password.compare(data.currentPassword, currentPassword, function(err, res) {
 					if (err || !res) {
 						return callback(err || new Error('[[user:change_password_error_wrong_current]]'));
 					}
@@ -257,5 +297,4 @@ module.exports = function(User) {
 			});
 		}
 	};
-
 };

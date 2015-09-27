@@ -1,5 +1,7 @@
 {
-    "username": "Användarnamn eller epostadress",
+    "username-email": "Användarnamn eller epostadress",
+    "username": "Användarnamn",
+    "email": "Epostadress",
     "remember_me": "Kom ihåg mig?",
     "forgot_password": "Glömt lösenord?",
     "alternative_logins": "Alternativa inloggningssätt",

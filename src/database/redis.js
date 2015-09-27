@@ -5,11 +5,12 @@
 	var winston = require('winston'),
 		nconf = require('nconf'),
 		path = require('path'),
+		semver = require('semver'),
 		session = require('express-session'),
 		utils = require('./../../public/src/utils.js'),
 		redis,
 		connectRedis,
-		reds,
+		redisSearch,
 		redisClient,
 		postSearch,
 		topicSearch;
@@ -28,7 +29,8 @@
 		{
 			name: 'redis:password',
 			description: 'Password of your Redis database',
-			hidden: true
+			hidden: true,
+			before: function(value) { value = value || nconf.get('redis:password') || ''; return value; }
 		},
 		{
 			name: "redis:database",
@@ -41,32 +43,13 @@
 		try {
 			redis = require('redis');
 			connectRedis = require('connect-redis')(session);
-			reds = require('reds');
+			redisSearch = require('redisearch');
 		} catch (err) {
 			winston.error('Unable to initialize Redis! Is Redis installed? Error :' + err.message);
 			process.exit();
 		}
 
-		var redis_socket_or_host = nconf.get('redis:host');
-
-		if (redis_socket_or_host && redis_socket_or_host.indexOf('/')>=0) {
-			/* If redis.host contains a path name character, use the unix dom sock connection. ie, /tmp/redis.sock */
-			redisClient = redis.createClient(nconf.get('redis:host'));
-		} else {
-			/* Else, connect over tcp/ip */
-			redisClient = redis.createClient(nconf.get('redis:port'), nconf.get('redis:host'));
-		}
-
-		if (nconf.get('redis:password')) {
-			redisClient.auth(nconf.get('redis:password'));
-		} else {
-			winston.warn('You have no redis password setup!');
-		}
-
-		redisClient.on('error', function (err) {
-			winston.error(err.stack);
-			process.exit(1);
-		});
+		redisClient = module.connect();
 
 		module.client = redisClient;
 
@@ -75,23 +58,8 @@
 			ttl: 60 * 60 * 24 * 14
 		});
 
-		reds.createClient = function () {
-			return reds.client || (reds.client = redisClient);
-		};
-
-		module.postSearch = reds.createSearch('nodebbpostsearch');
-		module.topicSearch = reds.createSearch('nodebbtopicsearch');
-
-		var db = parseInt(nconf.get('redis:database'), 10);
-
-		if (db) {
-			redisClient.select(db, function(error) {
-				if(error) {
-					winston.error("NodeBB could not connect to your Redis database. Redis returned the following error: " + error.message);
-					process.exit();
-				}
-			});
-		}
+		module.postSearch = redisSearch.createSearch('nodebbpostsearch', redisClient);
+		module.topicSearch = redisSearch.createSearch('nodebbtopicsearch', redisClient);
 
 		require('./redis/main')(redisClient, module);
 		require('./redis/hash')(redisClient, module);
@@ -104,8 +72,85 @@
 		}
 	};
 
+	module.connect = function(options) {
+		var redis_socket_or_host = nconf.get('redis:host'),
+			cxn, dbIdx;
+
+		options = options || {};
+
+		if (!redis) {
+			redis = require('redis');
+		}
+
+		if (redis_socket_or_host && redis_socket_or_host.indexOf('/') >= 0) {
+			/* If redis.host contains a path name character, use the unix dom sock connection. ie, /tmp/redis.sock */
+			cxn = redis.createClient(nconf.get('redis:host'), options);
+		} else {
+			/* Else, connect over tcp/ip */
+			cxn = redis.createClient(nconf.get('redis:port'), nconf.get('redis:host'), options);
+		}
+
+		cxn.on('error', function (err) {
+			winston.error(err.stack);
+			process.exit(1);
+		});
+
+		if (nconf.get('redis:password')) {
+			cxn.auth(nconf.get('redis:password'));
+		}
+
+		dbIdx = parseInt(nconf.get('redis:database'), 10);
+		if (dbIdx) {
+			cxn.select(dbIdx, function(error) {
+				if(error) {
+					winston.error("NodeBB could not connect to your Redis database. Redis returned the following error: " + error.message);
+					process.exit();
+				}
+			});
+		}
+
+		return cxn;
+	};
+
+	module.checkCompatibility = function(callback) {
+		module.info(module.client, function(err, info) {
+			if (err) {
+				return callback(err);
+			}
+
+			if (semver.lt(info.redis_version, '2.8.9')) {
+				err = new Error('Your Redis version is not new enough to support NodeBB, please upgrade Redis to v2.8.9 or higher.');
+				err.stacktrace = false;
+			}
+
+			callback(err);
+		});
+	};
+
 	module.close = function() {
 		redisClient.quit();
+	};
+
+	module.info = function(cxn, callback) {
+		cxn.info(function (err, data) {
+			if (err) {
+				return callback(err);
+			}
+
+			var lines = data.toString().split("\r\n").sort();
+			var redisData = {};
+			lines.forEach(function (line) {
+				var parts = line.split(':');
+				if (parts[1]) {
+					redisData[parts[0]] = parts[1];
+				}
+			});
+
+			redisData.raw = JSON.stringify(redisData, null, 4);
+			redisData.redis = true;
+
+			callback(null, redisData);
+		});
 	};
 
 	module.helpers = module.helpers || {};

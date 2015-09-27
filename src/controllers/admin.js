@@ -1,34 +1,45 @@
 "use strict";
 
 var async = require('async'),
+	fs = require('fs'),
+	path = require('path'),
+	nconf = require('nconf'),
 
 	user = require('../user'),
 	categories = require('../categories'),
+	privileges = require('../privileges'),
+	posts = require('../posts'),
 	topics = require('../topics'),
 	meta = require('../meta'),
 	db = require('../database'),
 	events = require('../events'),
 	languages = require('../languages'),
 	plugins = require('../plugins'),
-	widgets = require('../widgets'),
-	groups = require('../groups'),
-	pkg = require('../../package.json'),
 	validator = require('validator');
 
 
-
 var adminController = {
-	categories: {},
+	categories: require('./admin/categories'),
+	tags: {},
+	flags: {},
 	topics: {},
-	groups: {},
-	themes: {},
+	groups: require('./admin/groups'),
+	appearance: {},
+	extend: {
+		widgets: {}
+	},
 	events: {},
+	logs: {},
 	database: {},
+	postCache: {},
 	plugins: {},
 	languages: {},
 	settings: {},
 	logger: {},
 	sounds: {},
+	homepage: {},
+	navigation: {},
+	themes: {},
 	users: require('./admin/users'),
 	uploads: require('./admin/uploads')
 };
@@ -40,9 +51,25 @@ adminController.home = function(req, res, next) {
 		},
 		notices: function(next) {
 			var notices = [
-				{done: !meta.restartRequired, doneText: 'Restart not required', notDoneText:'Restart required'},
-				{done: plugins.hasListeners('action:email.send'), doneText: 'Emailer Installed', notDoneText:'Emailer not installed'},
-				{done: plugins.hasListeners('filter:search.query'), doneText: 'Search Plugin Installed', notDoneText:'Search Plugin not installed'}
+				{
+					done: !meta.reloadRequired,
+					doneText: 'Reload not required',
+					notDoneText:'Reload required'
+				},
+				{
+					done: plugins.hasListeners('action:email.send'),
+					doneText: 'Emailer Installed',
+					notDoneText:'Emailer not installed',
+					tooltip:'Install an emailer plugin from the plugin page in order to activate registration emails and email digests',
+					link:'/admin/extend/plugins'
+				},
+				{
+					done: plugins.hasListeners('filter:search.query'),
+					doneText: 'Search Plugin Installed',
+					notDoneText:'Search Plugin not installed',
+					tooltip: 'Install a search plugin from the plugin page in order to activate search functionality',
+					link:'/admin/extend/plugins'
+				}
 			];
 			plugins.fireHook('filter:admin.notices', notices, next);
 		}
@@ -50,8 +77,8 @@ adminController.home = function(req, res, next) {
 		if (err) {
 			return next(err);
 		}
-		res.render('admin/index', {
-			version: pkg.version,
+		res.render('admin/general/dashboard', {
+			version: nconf.get('version'),
 			notices: results.notices,
 			stats: results.stats
 		});
@@ -61,16 +88,16 @@ adminController.home = function(req, res, next) {
 function getStats(callback) {
 	async.parallel([
 		function(next) {
-			getStatsForSet('ip:recent', next);
+			getStatsForSet('ip:recent', 'uniqueIPCount', next);
 		},
 		function(next) {
-			getStatsForSet('users:joindate', next);
+			getStatsForSet('users:joindate', 'userCount', next);
 		},
 		function(next) {
-			getStatsForSet('posts:pid', next);
+			getStatsForSet('posts:pid', 'postCount', next);
 		},
 		function(next) {
-			getStatsForSet('topics:tid', next);
+			getStatsForSet('topics:tid', 'topicCount', next);
 		}
 	], function(err, results) {
 		if (err) {
@@ -85,12 +112,13 @@ function getStats(callback) {
 	});
 }
 
-function getStatsForSet(set, callback) {
+function getStatsForSet(set, field, callback) {
 	var terms = {
 		day: 86400000,
 		week: 604800000,
 		month: 2592000000
 	};
+
 	var now = Date.now();
 	async.parallel({
 		day: function(next) {
@@ -103,159 +131,167 @@ function getStatsForSet(set, callback) {
 			db.sortedSetCount(set, now - terms.month, now, next);
 		},
 		alltime: function(next) {
-			db.sortedSetCount(set, 0, now, next);
+			getGlobalField(field, next);
 		}
 	}, callback);
 }
 
-adminController.categories.active = function(req, res, next) {
-	filterAndRenderCategories(req, res, next, true);
-};
-
-adminController.categories.disabled = function(req, res, next) {
-	filterAndRenderCategories(req, res, next, false);
-};
-
-function filterAndRenderCategories(req, res, next, active) {
-	categories.getAllCategories(function (err, categoryData) {
-		categoryData = categoryData.filter(function (category) {
-			return active ? !category.disabled : category.disabled;
-		});
-
-		res.render('admin/categories', {categories: categoryData});
+function getGlobalField(field, callback) {
+	db.getObjectField('global', field, function(err, count) {
+		callback(err, parseInt(count, 10) || 0);
 	});
 }
 
+adminController.tags.get = function(req, res, next) {
+	topics.getTags(0, 199, function(err, tags) {
+		if (err) {
+			return next(err);
+		}
+
+		res.render('admin/manage/tags', {tags: tags});
+	});
+};
+
+adminController.flags.get = function(req, res, next) {
+	function done(err, posts) {
+		if (err) {
+			return next(err);
+		}
+		res.render('admin/manage/flags', {posts: posts, next: stop + 1, byUsername: byUsername});
+	}
+
+	var sortBy = req.query.sortBy || 'count';
+	var byUsername = req.query.byUsername || '';
+	var start = 0;
+	var stop = 19;
+
+	if (byUsername) {
+		posts.getUserFlags(byUsername, sortBy, req.uid, start, stop, done);
+	} else {
+		var set = sortBy === 'count' ? 'posts:flags:count' : 'posts:flagged';
+		posts.getFlags(set, req.uid, start, stop, done);
+	}
+};
+
 adminController.database.get = function(req, res, next) {
-	db.info(function (err, data) {
-		res.render('admin/database', data);
+	async.parallel({
+		redis: function(next) {
+			if (nconf.get('redis')) {
+				var rdb = require('../database/redis');
+				var cxn = rdb.connect();
+				rdb.info(cxn, next);
+			} else {
+				next();
+			}
+		},
+		mongo: function(next) {
+			if (nconf.get('mongo')) {
+				var mdb = require('../database/mongo');
+				mdb.info(mdb.client, next);
+			} else {
+				next();
+			}
+		}
+	}, function(err, results) {
+		if (err) {
+			return next(err);
+		}
+		res.render('admin/advanced/database', results);
 	});
 };
 
 adminController.events.get = function(req, res, next) {
-	events.getLog(function(err, data) {
-		if(err || !data) {
+	events.getEvents(0, 19, function(err, events) {
+		if(err || !events) {
 			return next(err);
 		}
 
-		data = data.toString().split('\n').reverse().join('\n');
-		res.render('admin/events', {
-			eventdata: data
+		res.render('admin/advanced/events', {
+			events: events,
+			next: 20
 		});
+	});
+};
+
+adminController.logs.get = function(req, res, next) {
+	meta.logs.get(function(err, logs) {
+		res.render('admin/advanced/logs', {
+			data: validator.escape(logs)
+		});
+	});
+};
+
+adminController.postCache.get = function(req, res, next) {
+	var cache = require('../posts/cache');
+	var avgPostSize = 0;
+	var percentFull = 0;
+	if (cache.itemCount > 0) {
+		avgPostSize = parseInt((cache.length / cache.itemCount), 10);
+		percentFull = ((cache.length / cache.max) * 100).toFixed(2);
+	}
+
+	res.render('admin/advanced/post-cache', {
+		cache: {
+			length: cache.length,
+			max: cache.max,
+			itemCount: cache.itemCount,
+			percentFull: percentFull,
+			avgPostSize: avgPostSize
+		}
 	});
 };
 
 adminController.plugins.get = function(req, res, next) {
-	plugins.getAll(function(err, plugins) {
-		if (err || !Array.isArray(plugins)) {
-			plugins = [];
-		}
+	async.parallel({
+		compatible: function(next) {
+			plugins.list(function(err, plugins) {
+				if (err || !Array.isArray(plugins)) {
+					plugins = [];
+				}
 
-		res.render('admin/plugins' , {
-			plugins: plugins
+				next(null, plugins);
+			});
+		},
+		all: function(next) {
+			plugins.list(false, function(err, plugins) {
+				if (err || !Array.isArray(plugins)) {
+					plugins = [];
+				}
+
+				next(null, plugins);
+			});
+		}
+	}, function(err, payload) {
+		var compatiblePkgNames = payload.compatible.map(function(pkgData) {
+				return pkgData.name;
+			});
+
+		res.render('admin/extend/plugins' , {
+			installed: payload.compatible.filter(function(plugin) {
+				return plugin.installed;
+			}),
+			download: payload.compatible.filter(function(plugin) {
+				return !plugin.installed;
+			}),
+			incompatible: payload.all.filter(function(plugin) {
+				return compatiblePkgNames.indexOf(plugin.name) === -1;
+			})
 		});
-	})
+	});
 };
 
 adminController.languages.get = function(req, res, next) {
 	languages.list(function(err, languages) {
-		res.render('admin/languages', {
-			languages: languages
-		});
-	});
-};
-
-adminController.settings.get = function(req, res, next) {
-	res.render('admin/settings', {});
-};
-
-adminController.logger.get = function(req, res, next) {
-	res.render('admin/logger', {});
-};
-
-adminController.themes.get = function(req, res, next) {
-	async.parallel({
-		areas: function(next) {
-			var defaultAreas = [
-				{ name: 'Global Sidebar', template: 'global', location: 'sidebar' },
-				{ name: 'Global Header', template: 'global', location: 'header' },
-				{ name: 'Global Footer', template: 'global', location: 'footer' },
-			];
-
-			plugins.fireHook('filter:widgets.getAreas', defaultAreas, next);
-		},
-		widgets: function(next) {
-			plugins.fireHook('filter:widgets.getWidgets', [], next);
+		if (err) {
+			return next(err);
 		}
-	}, function(err, widgetData) {
-		widgetData.areas.push({ name: 'Draft Zone', template: 'global', location: 'drafts' });
 
-		async.each(widgetData.areas, function(area, next) {
-			widgets.getArea(area.template, area.location, function(err, areaData) {
-				area.data = areaData;
-				next(err);
-			});
-		}, function(err) {
-			for (var w in widgetData.widgets) {
-				if (widgetData.widgets.hasOwnProperty(w)) {
-					// if this gets anymore complicated, it needs to be a template
-					widgetData.widgets[w].content += "<br /><label>Title:</label><input type=\"text\" class=\"form-control\" name=\"title\" placeholder=\"Title (only shown on some containers)\" /><br /><label>Container:</label><textarea rows=\"4\" class=\"form-control container-html\" name=\"container\" placeholder=\"Drag and drop a container or enter HTML here.\"></textarea><div class=\"checkbox\"><label><input name=\"registered-only\" type=\"checkbox\"> Hide from anonymous users?</label></div>";
-				}
-			}
-
-			var branding = [];
-
-			for (var key in meta.css.branding) {
-				if (meta.css.branding.hasOwnProperty(key)) {
-					branding.push({
-						key: key,
-						value: meta.css.branding[key]
-					});
-				}
-			}
-
-			var templates = [],
-				list = {}, index = 0;
-
-			widgetData.areas.forEach(function(area) {
-				if (typeof list[area.template] === 'undefined') {
-					list[area.template] = index;
-					templates.push({
-						template: area.template,
-						areas: []
-					});
-
-					index++;
-				}
-
-				templates[list[area.template]].areas.push({
-					name: area.name,
-					location: area.location
-				});
-			});
-
-			res.render('admin/themes', {
-				templates: templates,
-				areas: widgetData.areas,
-				widgets: widgetData.widgets,
-				branding: branding
-			});
+		languages.forEach(function(language) {
+			language.selected = language.code === (meta.config.defaultLang || 'en_GB');
 		});
-	});
-};
 
-adminController.groups.get = function(req, res, next) {
-	groups.list({
-		expand: true,
-		showSystemGroups: true,
-		truncateUserList: true
-	}, function(err, groups) {
-		groups = groups.filter(function(group) {
-			return group.name !== 'registered-users' && group.name !== 'guests';
-		});
-		res.render('admin/groups', {
-			groups: groups,
-			yourid: req.user.uid
+		res.render('admin/general/languages', {
+			languages: languages
 		});
 	});
 };
@@ -268,9 +304,119 @@ adminController.sounds.get = function(req, res, next) {
 			};
 		});
 
-		res.render('admin/sounds', {
+		res.render('admin/general/sounds', {
 			sounds: sounds
 		});
+	});
+};
+
+adminController.navigation.get = function(req, res, next) {
+	require('../navigation/admin').getAdmin(function(err, data) {
+		if (err) {
+			return next(err);
+		}
+
+		res.render('admin/general/navigation', data);
+	});
+};
+
+adminController.homepage.get = function(req, res, next) {
+	async.waterfall([
+		function(next) {
+			db.getSortedSetRange('categories:cid', 0, -1, next);
+		},
+		function(cids, next) {
+			privileges.categories.filterCids('find', cids, 0, next);
+		},
+		function(cids, next) {
+			categories.getMultipleCategoryFields(cids, ['name', 'slug'], next);
+		},
+		function(categoryData, next) {
+			categoryData = categoryData.map(function(category) {
+				return {
+					route: 'category/' + category.slug,
+					name: 'Category: ' + category.name
+				};
+			});
+			next(null, categoryData);
+		}
+	], function(err, categoryData) {
+		if (err || !categoryData) categoryData = [];
+
+		plugins.fireHook('filter:homepage.get', {routes: [
+			{
+				route: 'categories',
+				name: 'Categories'
+			},
+			{
+				route: 'recent',
+				name: 'Recent'
+			},
+			{
+				route: 'popular',
+				name: 'Popular'
+			}
+		].concat(categoryData)}, function(err, data) {
+			data.routes.push({
+				route: '',
+				name: 'Custom'
+			});
+
+			res.render('admin/general/homepage', data);
+		});
+	});
+};
+
+adminController.settings.get = function(req, res, next) {
+	var term = req.params.term ? req.params.term : 'general';
+
+	res.render('admin/settings/' + term);
+};
+
+adminController.logger.get = function(req, res, next) {
+	res.render('admin/development/logger', {});
+};
+
+adminController.appearance.get = function(req, res, next) {
+	var term = req.params.term ? req.params.term : 'themes';
+
+	res.render('admin/appearance/' + term, {});
+};
+
+adminController.extend.widgets = function(req, res, next) {
+	require('../widgets/admin').get(function(err, data) {
+		if (err) {
+			return next(err);
+		}
+
+		res.render('admin/extend/widgets', data);
+	});
+};
+
+adminController.extend.rewards = function(req, res, next) {
+	require('../rewards/admin').get(function(err, data) {
+		if (err) {
+			return next(err);
+		}
+
+		res.render('admin/extend/rewards', data);
+	});
+};
+
+adminController.themes.get = function(req, res, next) {
+	var themeDir = path.join(__dirname, '../../node_modules/' + req.params.theme);
+	fs.exists(themeDir, function(exists) {
+		if (exists) {
+			var themeConfig = require(path.join(themeDir, 'theme.json')),
+				screenshotPath = path.join(themeDir, themeConfig.screenshot);
+			if (themeConfig.screenshot && fs.existsSync(screenshotPath)) {
+				res.sendFile(screenshotPath);
+			} else {
+				res.sendFile(path.join(__dirname, '../../public/images/themes/default.png'));
+			}
+		} else {
+			return next();
+		}
 	});
 };
 

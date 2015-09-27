@@ -2,27 +2,26 @@
 
 var async = require('async'),
 	db = require('../database'),
+	batch = require('../batch'),
+	plugins = require('../plugins'),
 	threadTools = require('../threadTools');
 
 
 module.exports = function(Categories) {
 
 	Categories.purge = function(cid, callback) {
-
-		Categories.getTopicIds(cid, 0, -1, function(err, tids) {
+		batch.processSortedSet('cid:' + cid + ':tids', function(tids, next) {
+			async.eachLimit(tids, 10, function(tid, next) {
+				threadTools.purge(tid, 0, next);
+			}, next);
+		}, {alwaysStartAt: 0}, function(err) {
 			if (err) {
 				return callback(err);
 			}
-
-			async.eachLimit(tids, 10, function(tid, next) {
-				threadTools.purge(tid, 0, next);
-			}, function(err) {
-				if (err) {
-					return callback(err);
-				}
-
-				purgeCategory(cid, callback);
-			});
+			async.series([
+				async.apply(purgeCategory, cid),
+				async.apply(plugins.fireHook, 'action:category.delete', cid)
+			], callback);
 		});
 	};
 
@@ -32,14 +31,48 @@ module.exports = function(Categories) {
 				db.sortedSetRemove('categories:cid', cid, next);
 			},
 			function(next) {
-				db.delete('categories:' + cid + ':tid', next);
+				removeFromParent(cid, next);
 			},
 			function(next) {
-				db.delete('categories:recent_posts:cid:' + cid, next);
-			},
-			function(next) {
-				db.delete('category:' + cid, next);
+				db.deleteAll([
+					'cid:' + cid + ':tids',
+					'cid:' + cid + ':tids:posts',
+					'cid:' + cid + ':pids',
+					'cid:' + cid + ':read_by_uid',
+					'cid:' + cid + ':children',
+					'category:' + cid
+				], next);
 			}
 		], callback);
+	}
+
+	function removeFromParent(cid, callback) {
+		async.waterfall([
+			function(next) {
+				async.parallel({
+					parentCid: function(next) {
+						Categories.getCategoryField(cid, 'parentCid', next);
+					},
+					children: function(next) {
+						db.getSortedSetRange('cid:' + cid + ':children', 0, -1, next);
+					}
+				}, next);
+			},
+			function(results, next) {
+				async.parallel([
+					function(next) {
+						results.parentCid = parseInt(results.parentCid, 10) || 0;
+						db.sortedSetRemove('cid:' + results.parentCid + ':children', cid, next);
+					},
+					function(next) {
+						async.each(results.children, function(cid, next) {
+							db.setObjectField('category:' + cid, 'parentCid', 0, next);
+						}, next);
+					}
+				], next);
+			}
+		], function(err, results) {
+			callback(err);
+		});
 	}
 };

@@ -1,15 +1,19 @@
 'use strict';
 
-var	meta = require('../meta'),
+var	nconf = require('nconf'),
+	gravatar = require('gravatar'),
+	winston = require('winston'),
+	validator = require('validator'),
+
+	db = require('../database'),
+	meta = require('../meta'),
 	user = require('../user'),
 	topics = require('../topics'),
 	logger = require('../logger'),
 	plugins = require('../plugins'),
 	emitter = require('../emitter'),
+	rooms = require('./rooms'),
 
-	nconf = require('nconf'),
-	gravatar = require('gravatar'),
-	winston = require('winston'),
 	websockets = require('./'),
 
 	SocketMeta = {
@@ -17,70 +21,123 @@ var	meta = require('../meta'),
 	};
 
 SocketMeta.reconnected = function(socket, data, callback) {
-	var	uid = socket.uid,
-		sessionID = socket.id;
-
-	if (uid) {
-		topics.pushUnreadCount(uid);
-		user.notifications.pushCount(uid);
-	}
-
-	if (process.env.NODE_ENV === 'development') {
-		if (uid) {
-			winston.info('[socket] uid ' + uid + ' (' + sessionID + ') has successfully reconnected.');
-		} else {
-			winston.info('[socket] An anonymous user (' + sessionID + ') has successfully reconnected.');
-		}
+	if (socket.uid) {
+		topics.pushUnreadCount(socket.uid);
+		user.notifications.pushCount(socket.uid);
 	}
 };
 
 emitter.on('nodebb:ready', function() {
-	websockets.server.sockets.emit('event:nodebb.ready', meta.config['cache-buster']);
+	websockets.server.sockets.emit('event:nodebb.ready', {
+		'cache-buster': meta.config['cache-buster']
+	});
 });
 
-SocketMeta.buildTitle = function(socket, text, callback) {
-	if (socket.uid) {
-		user.getSettings(socket.uid, function(err, settings) {
-			if (err) {
-				return callback(err);
-			}
-			meta.title.build(text, settings.language, callback);
-		});
-	} else {
-		meta.title.build(text, meta.config.defaultLang, callback);
-	}
-};
-
-SocketMeta.getUsageStats = function(socket, data, callback) {
-	module.parent.exports.emitTopicPostStats(callback);
-};
 
 /* Rooms */
 
 SocketMeta.rooms.enter = function(socket, data, callback) {
-	if(!data) {
+	if (!socket.uid) {
+		return callback();
+	}
+
+	if (!data) {
 		return callback(new Error('[[error:invalid-data]]'));
 	}
 
-	if (data.leave !== null) {
-		socket.leave(data.leave);
+	if (data.enter) {
+		data.enter = data.enter.toString();
 	}
 
-	socket.join(data.enter);
-
-	if (data.leave && data.leave !== data.enter) {
-		module.parent.exports.updateRoomBrowsingText(data.leave);
+	if (data.enter && data.enter.startsWith('uid_') && data.enter !== 'uid_' + socket.uid) {
+		return callback(new Error('[[error:not-allowed]]'));
 	}
 
-	module.parent.exports.updateRoomBrowsingText(data.enter);
-
-	if (data.enter !== 'admin') {
-		websockets.in('admin').emit('event:meta.rooms.update', null, websockets.server.sockets.manager.rooms);
+	if (socket.currentRoom) {
+		rooms.leave(socket, socket.currentRoom);
+		if (socket.currentRoom.indexOf('topic') !== -1) {
+			websockets.in(socket.currentRoom).emit('event:user_leave', socket.uid);
+		}
+		socket.currentRoom = '';
 	}
+
+	if (data.enter) {
+		rooms.enter(socket, data.enter);
+		socket.currentRoom = data.enter;
+		if (data.enter.indexOf('topic') !== -1) {
+			data.uid = socket.uid;
+			data.picture = validator.escape(data.picture);
+			data.username = validator.escape(data.username);
+			data.userslug = validator.escape(data.userslug);
+
+			websockets.in(data.enter).emit('event:user_enter', data);
+		}
+	}
+	callback();
 };
 
 SocketMeta.rooms.getAll = function(socket, data, callback) {
-	callback(null, websockets.server.sockets.manager.rooms);
+	var roomClients = rooms.roomClients();
+	var socketData = {
+			onlineGuestCount: websockets.getOnlineAnonCount(),
+			onlineRegisteredCount: websockets.getOnlineUserCount(),
+			socketCount: websockets.getSocketCount(),
+			users: {
+				categories: roomClients.categories ? roomClients.categories.length : 0,
+				recent: roomClients.recent_topics ? roomClients.recent_topics.length : 0,
+				unread: roomClients.unread_topics ? roomClients.unread_topics.length: 0,
+				popular: roomClients.popular_topics ? roomClients.popular_topics.length: 0,
+				topics: 0,
+				category: 0
+			},
+			topics: {}
+		};
+
+	var scores = {},
+		topTenTopics = [],
+		tid;
+
+	for (var room in roomClients) {
+		if (roomClients.hasOwnProperty(room)) {
+			tid = room.match(/^topic_(\d+)/);
+			if (tid) {
+				var length = roomClients[room].length;
+				socketData.users.topics += length;
+
+				if (scores[length]) {
+					scores[length].push(tid[1]);
+				} else {
+					scores[length] = [tid[1]];
+				}
+			} else if (room.match(/^category/)) {
+				socketData.users.category += roomClients[room].length;
+			}
+		}
+	}
+
+	var scoreKeys = Object.keys(scores),
+		mostActive = scoreKeys.sort();
+
+	while(topTenTopics.length < 10 && mostActive.length > 0) {
+		topTenTopics = topTenTopics.concat(scores[mostActive.pop()]);
+	}
+
+	topTenTopics = topTenTopics.slice(0, 10);
+
+	topics.getTopicsFields(topTenTopics, ['title'], function(err, titles) {
+		if (err) {
+			return callback(err);
+		}
+		topTenTopics.forEach(function(tid, id) {
+			socketData.topics[tid] = {
+				value: Array.isArray(roomClients['topic_' + tid]) ? roomClients['topic_' + tid].length : 0,
+				title: validator.escape(titles[id].title)
+			};
+		});
+
+		callback(null, socketData);
+	});
+
 };
 
 /* Exports */

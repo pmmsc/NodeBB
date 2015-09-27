@@ -9,12 +9,12 @@ var	_ = require('underscore'),
 	winston = require('winston'),
 
 	plugins = require('../plugins'),
-	pluginRoutes = [];
+	helpers = require('../controllers/helpers');
 
 
 module.exports = function(app, middleware, controllers) {
 	// Static Assets
-	app.get('/plugins/:id/*', middleware.addExpiresHeaders, function(req, res) {
+	app.get('/plugins/:id/*', middleware.addExpiresHeaders, function(req, res, next) {
 		var	relPath = req._parsedUrl.pathname.replace('/plugins/', ''),
 			matches = _.map(plugins.staticDirs, function(realPath, mappedPath) {
 				if (relPath.match(mappedPath)) {
@@ -36,19 +36,19 @@ module.exports = function(app, middleware, controllers) {
 					}
 				});
 			}, function(err, matches) {
-				// Filter out the nulls
-				matches = matches.filter(function(a) {
-					return a;
-				});
+				if (err) {
+					return next(err);
+				}
+				matches = matches.filter(Boolean);
 
 				if (matches.length) {
-					res.sendfile(matches[0]);
+					res.sendFile(matches[0]);
 				} else {
-					res.redirect(nconf.get('relative_path') + '/404');
+					next();
 				}
 			});
 		} else {
-			res.redirect(nconf.get('relative_path') + '/404');
+			next();
 		}
 	});
 };

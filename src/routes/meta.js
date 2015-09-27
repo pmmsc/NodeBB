@@ -1,59 +1,37 @@
 "use strict";
 
-var path = require('path'),
-	nconf = require('nconf'),
-
-	meta = require('../meta'),
-	db = require('../database'),
-	plugins = require('../plugins'),
-	middleware = require('../middleware'),
-
-	minificationEnabled = false;
+var meta = require('../meta'),
+	middleware = require('../middleware');
 
 
 function sendMinifiedJS(req, res, next) {
-	if (!minificationEnabled) {
-		res.set('X-SourceMap', '/nodebb.min.js.map');
-	}
-
-	return res.type('text/javascript').send(meta.js.cache);
+	res.type('text/javascript').send(meta.js.cache);
 }
 
-function sendSourceMap(req, res) {
-	return res.type('application/json').send(meta.js.map);
-}
+// The portions of code involving the source map are commented out as they're broken in UglifyJS2
+// Follow along here: https://github.com/mishoo/UglifyJS2/issues/700
+// function sendJSSourceMap(req, res) {
+// 	if (meta.js.hasOwnProperty('map')) {
+// 		res.type('application/json').send(meta.js.map);
+// 	} else {
+// 		res.redirect(404);
+// 	}
+// };
 
 function sendStylesheet(req, res, next) {
-	res.type('text/css').send(200, meta.css.cache);
+	res.type('text/css').status(200).send(meta.css.cache);
 }
 
-function setupPluginSourceMapping(app) {
-	/*
-		These mappings are utilised by the source map file, as client-side
-		scripts defined in `scripts` in plugin.json are not normally
-		served to the end-user. These mappings are only accessible via
-		development mode (`./nodebb dev`)
-	*/
-	var	routes = plugins.clientScripts,
-		mapping,
-		prefix = __dirname.split(path.sep).length - 1;
-
-	routes.forEach(function(route) {
-		mapping = '/' + route.split(path.sep).slice(prefix).join('/');
-		app.get(mapping, function(req, res) {
-			res.type('text/javascript').sendfile(route);
-		});
-	});
+function sendACPStylesheet(req, res, next) {
+	res.type('text/css').status(200).send(meta.css.acpCache);
 }
 
 module.exports = function(app, middleware, controllers) {
 	app.get('/stylesheet.css', middleware.addExpiresHeaders, sendStylesheet);
+	app.get('/admin.css', middleware.addExpiresHeaders, sendACPStylesheet);
 	app.get('/nodebb.min.js', middleware.addExpiresHeaders, sendMinifiedJS);
+	// app.get('/nodebb.min.js.map', middleware.addExpiresHeaders, sendJSSourceMap);
 	app.get('/sitemap.xml', controllers.sitemap);
 	app.get('/robots.txt', controllers.robots);
-
-	if (!minificationEnabled) {
-		app.get('/nodebb.min.js.map', middleware.addExpiresHeaders, sendSourceMap);
-		setupPluginSourceMapping(app);
-	}
+	app.get('/css/previews/:theme', controllers.admin.themes.get);
 };

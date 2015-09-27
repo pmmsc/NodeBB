@@ -1,89 +1,76 @@
-define('uploader', function() {
+'use strict';
 
-	var module = {},
-		maybeParse = function(response) {
-			if (typeof response == 'string')  {
-				try {
-					return $.parseJSON(response);
-				} catch (e) {
-					return {error: 'Something went wrong while parsing server response'};
-				}
-			}
-			return response;
-		};
+/* globals define */
+
+define('uploader', ['csrf'], function(csrf) {
+
+	var module = {};
 
 	module.open = function(route, params, fileSize, callback) {
-		$('#upload-picture-modal').modal('show').removeClass('hide');
+		var uploadModal = $('#upload-picture-modal');
+		uploadModal.modal('show').removeClass('hide');
 		module.hideAlerts();
 		var uploadForm = $('#uploadForm');
 		uploadForm[0].reset();
 		uploadForm.attr('action', route);
 		uploadForm.find('#params').val(JSON.stringify(params));
 
-		if(fileSize) {
-			uploadForm.find('#upload-file-size').html(fileSize);
-			uploadForm.find('#file-size-block').removeClass('hide');
+		if (fileSize) {
+			uploadForm.find('#file-size-block')
+				.translateText('[[uploads:maximum-file-size, ' + fileSize + ']]')
+				.removeClass('hide');
 		} else {
 			uploadForm.find('#file-size-block').addClass('hide');
 		}
 
 		$('#pictureUploadSubmitBtn').off('click').on('click', function() {
-			$('#uploadForm').submit();
+			uploadForm.submit();
 		});
 
 		uploadForm.off('submit').submit(function() {
 
-			function status(message) {
+			function showAlert(type, message) {
 				module.hideAlerts();
-				$('#alert-status').text(message).removeClass('hide');
+				uploadModal.find('#alert-' + type).translateText(message).removeClass('hide');
 			}
 
-			function success(message) {
-				module.hideAlerts();
-				$('#alert-success').text(message).removeClass('hide');
-			}
+			showAlert('status', '[[uploads:uploading-file]]');
 
-			function error(message) {
-				module.hideAlerts();
-				$('#alert-error').text(message).removeClass('hide');
-			}
-
-			status('uploading the file ...');
-
-			$('#upload-progress-bar').css('width', '0%');
-			$('#upload-progress-box').show().removeClass('hide');
+			uploadModal.find('#upload-progress-bar').css('width', '0%');
+			uploadModal.find('#upload-progress-box').show().removeClass('hide');
 
 			if (!$('#userPhotoInput').val()) {
-				error('select an image to upload!');
+				showAlert('error', '[[uploads:select-file-to-upload]]');
 				return false;
 			}
 
-			$(this).find('#imageUploadCsrf').val($('#csrf_token').val());
-
-
 			$(this).ajaxSubmit({
+				headers: {
+					'x-csrf-token': csrf.get()
+				},
 				error: function(xhr) {
 					xhr = maybeParse(xhr);
-					error('Error: ' + xhr.status);
+					showAlert('error', xhr.responseJSON ? xhr.responseJSON.error : 'error uploading, code : ' + xhr.status);
 				},
 
 				uploadProgress: function(event, position, total, percent) {
-					$('#upload-progress-bar').css('width', percent + '%');
+					uploadModal.find('#upload-progress-bar').css('width', percent + '%');
 				},
 
 				success: function(response) {
 					response = maybeParse(response);
 
 					if (response.error) {
-						error(response.error);
+						showAlert('error', response.error);
 						return;
 					}
-					callback(response.path);
 
-					success('File uploaded successfully!');
+					callback(response[0].url);
+
+					showAlert('success', '[[uploads:upload-success]]');
 					setTimeout(function() {
 						module.hideAlerts();
-						$('#upload-picture-modal').modal('hide');
+						uploadModal.modal('hide');
 					}, 750);
 				}
 			});
@@ -92,11 +79,19 @@ define('uploader', function() {
 		});
 	};
 
+	function maybeParse(response) {
+		if (typeof response === 'string') {
+			try {
+				return $.parseJSON(response);
+			} catch (e) {
+				return {error: '[[error:parse-error]]'};
+			}
+		}
+		return response;
+	}
+
 	module.hideAlerts = function() {
-		$('#alert-status').addClass('hide');
-		$('#alert-success').addClass('hide');
-		$('#alert-error').addClass('hide');
-		$('#upload-progress-box').addClass('hide');
+		$('#upload-picture-modal').find('#alert-status, #alert-success, #alert-error, #upload-progress-box').addClass('hide');
 	};
 
 	return module;

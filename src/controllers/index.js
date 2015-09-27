@@ -1,194 +1,170 @@
 "use strict";
 
-var topicsController = require('./topics'),
-	categoriesController = require('./categories'),
-	tagsController = require('./tags'),
-	usersController = require('./users'),
-	groupsController = require('./groups'),
-	accountsController = require('./accounts'),
-	staticController = require('./static'),
-	apiController = require('./api'),
-	adminController = require('./admin'),
-
-	async = require('async'),
+var async = require('async'),
 	nconf = require('nconf'),
+	validator = require('validator'),
 	winston = require('winston'),
-	auth = require('../routes/authentication'),
+
 	meta = require('../meta'),
 	user = require('../user'),
 	posts = require('../posts'),
 	topics = require('../topics'),
-	search = require('../search'),
 	plugins = require('../plugins'),
 	categories = require('../categories'),
-	privileges = require('../privileges');
+	privileges = require('../privileges'),
+	helpers = require('./helpers');
 
 var Controllers = {
-	topics: topicsController,
-	categories: categoriesController,
-	tags: tagsController,
-	users: usersController,
-	groups: groupsController,
-	accounts: accountsController,
-	static: staticController,
-	api: apiController,
-	admin: adminController
+	posts: require('./posts'),
+	topics: require('./topics'),
+	categories: require('./categories'),
+	unread: require('./unread'),
+	recent: require('./recent'),
+	popular: require('./popular'),
+	tags: require('./tags'),
+	search: require('./search'),
+	users: require('./users'),
+	groups: require('./groups'),
+	accounts: require('./accounts'),
+	authentication: require('./authentication'),
+	api: require('./api'),
+	admin: require('./admin')
 };
 
 
 Controllers.home = function(req, res, next) {
-	async.parallel({
-		header: function (next) {
-			res.locals.metaTags = [{
-				name: "title",
-				content: meta.config.title || 'NodeBB'
-			}, {
-				name: "description",
-				content: meta.config.description || ''
-			}, {
-				property: 'og:title',
-				content: 'Index | ' + (meta.config.title || 'NodeBB')
-			}, {
-				property: 'og:type',
-				content: 'website'
-			}];
+	var route = meta.config.homePageRoute || meta.config.homePageCustom || 'categories',
+		hook = 'action:homepage.get:' + route;
 
-			if(meta.config['brand:logo']) {
-				res.locals.metaTags.push({
-					property: 'og:image',
-					content: meta.config['brand:logo']
-				});
-			}
-
-			next(null);
-		},
-		categories: function (next) {
-			var uid = req.user ? req.user.uid : 0;
-			categories.getCategoriesByPrivilege(uid, 'find', function (err, categoryData) {
-				if (err) {
-					return next(err);
-				}
-
-				function getRecentReplies(category, callback) {
-					categories.getRecentTopicReplies(category.cid, uid, parseInt(category.numRecentReplies, 10), function (err, posts) {
-						if (err) {
-							return callback(err);
-						}
-						category.posts = posts;
-						callback();
-					});
-				}
-
-				async.each(categoryData, getRecentReplies, function (err) {
-					next(err, categoryData);
-				});
-			});
+	if (plugins.hasListeners(hook)) {
+		plugins.fireHook(hook, {req: req, res: res, next: next});
+	} else {
+		if (route === 'categories' || route === '/') {
+			Controllers.categories.list(req, res, next);
+		} else if (route === 'recent') {
+			Controllers.recent.get(req, res, next);
+		} else if (route === 'popular') {
+			Controllers.popular.get(req, res, next);
+		} else {
+			res.redirect(route);
 		}
-	}, function (err, data) {
-		if (err) {
-			return next(err);
-		}
-		res.render('home', data);
-	});
-};
-
-Controllers.search = function(req, res, next) {
-	if (!req.params.term) {
-		return res.render('search', {
-			time: 0,
-			search_query: '',
-			posts: [],
-			topics: []
-		});
 	}
-
-	var uid = req.user ? req.user.uid : 0;
-
-	if (!plugins.hasListeners('filter:search.query')) {
-		return res.redirect('/404');
-	}
-
-	search.search(req.params.term, uid, function(err, results) {
-		if (err) {
-			return next(err);
-		}
-
-		return res.render('search', results);
-	});
 };
 
 Controllers.reset = function(req, res, next) {
-	res.render(req.params.code ? 'reset_code' : 'reset', {
-		reset_code: req.params.code ? req.params.code : null
-	});
+	if (req.params.code) {
+		user.reset.validate(req.params.code, function(err, valid) {
+			if (err) {
+				return next(err);
+			}
+			res.render('reset_code', {
+				valid: valid,
+				displayExpiryNotice: req.session.passwordExpired,
+				code: req.params.code ? req.params.code : null,
+				breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]', url: '/reset'}, {text: '[[reset_password:update_password]]'}]),
+				title: '[[pages:reset]]'
+			});
+
+			delete req.session.passwordExpired;
+		});
+	} else {
+		res.render('reset', {
+			code: req.params.code ? req.params.code : null,
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[reset_password:reset_password]]'}]),
+			title: '[[pages:reset]]'
+		});
+	}
+
 };
 
 Controllers.login = function(req, res, next) {
 	var data = {},
-		login_strategies = auth.get_login_strategies(),
-		num_strategies = login_strategies.length,
+		loginStrategies = require('../routes/authentication').getLoginStrategies(),
 		emailersPresent = plugins.hasListeners('action:email.send');
 
-	data.alternate_logins = num_strategies > 0;
-	data.authentication = login_strategies;
-	data.token = res.locals.csrf_token;
-	data.showResetLink = emailersPresent;
-	data.allowLocalLogin = meta.config.allowLocalLogin === undefined || parseInt(meta.config.allowLocalLogin, 10) === 1;
-	data.allowRegistration = meta.config.allowRegistration;
+	var registrationType = meta.config.registrationType || 'normal';
 
-	if (req.query.next) {
-		data.previousUrl = req.query.next;
-	}
+	data.alternate_logins = loginStrategies.length > 0;
+	data.authentication = loginStrategies;
+	data.showResetLink = emailersPresent;
+	data.allowLocalLogin = parseInt(meta.config.allowLocalLogin, 10) === 1 || parseInt(req.query.local, 10) === 1;
+	data.allowRegistration = registrationType === 'normal' || registrationType === 'admin-approval';
+	data.allowLoginWith = '[[login:' + (meta.config.allowLoginWith || 'username-email') + ']]';
+	data.breadcrumbs = helpers.buildBreadcrumbs([{text: '[[global:login]]'}]);
+	data.error = req.flash('error')[0];
+	data.title = '[[pages:login]]';
 
 	res.render('login', data);
 };
 
 Controllers.register = function(req, res, next) {
+	var registrationType = meta.config.registrationType || 'normal';
 
-	var data = {},
-		login_strategies = auth.get_login_strategies(),
-		num_strategies = login_strategies.length;
-
-	if (num_strategies === 0) {
-		data = {
-			'register_window:spansize': 'col-md-12',
-			'alternate_logins': false
-		};
-	} else {
-		data = {
-			'register_window:spansize': 'col-md-6',
-			'alternate_logins': true
-		};
+	if (registrationType === 'disabled') {
+		return next();
 	}
 
-	data.authentication = login_strategies;
+	async.waterfall([
+		function(next) {
+			if (registrationType === 'invite-only') {
+				user.verifyInvitation(req.query, next);
+			} else {
+				next();
+			}
+		},
+		function(next) {
+			plugins.fireHook('filter:parse.post', {postData: {content: meta.config.termsOfUse}}, next);
+		},
+		function(tos, next) {
+			var loginStrategies = require('../routes/authentication').getLoginStrategies();
+			var data = {
+				'register_window:spansize': loginStrategies.length ? 'col-md-6' : 'col-md-12',
+				'alternate_logins': !!loginStrategies.length
+			};
 
-	data.token = res.locals.csrf_token;
-	data.minimumUsernameLength = meta.config.minimumUsernameLength;
-	data.maximumUsernameLength = meta.config.maximumUsernameLength;
-	data.minimumPasswordLength = meta.config.minimumPasswordLength;
-	data.termsOfUse = meta.config.termsOfUse;
-	data.regFormEntry = [];
+			data.authentication = loginStrategies;
 
-	plugins.fireHook('filter:register.build', req, res, data, function(err, req, res, data) {
-		if (err && process.env === 'development') {
-			winston.warn(JSON.stringify(err));
+			data.minimumUsernameLength = meta.config.minimumUsernameLength;
+			data.maximumUsernameLength = meta.config.maximumUsernameLength;
+			data.minimumPasswordLength = meta.config.minimumPasswordLength;
+			data.termsOfUse = tos.postData.content;
+			data.breadcrumbs = helpers.buildBreadcrumbs([{text: '[[register:register]]'}]);
+			data.regFormEntry = [];
+			data.error = req.flash('error')[0];
+			data.title = '[[pages:register]]';
+
+			plugins.fireHook('filter:register.build', {req: req, res: res, templateData: data}, next);
 		}
-		res.render('register', data);
+	], function(err, data) {
+		if (err) {
+			return next(err);
+		}
+		res.render('register', data.templateData);
 	});
 };
 
+Controllers.compose = function(req, res, next) {
+	if (req.query.p && !res.locals.isAPI) {
+		if (req.query.p.startsWith(nconf.get('relative_path'))) {
+			req.query.p = req.query.p.replace(nconf.get('relative_path'), '');
+		}
+		return helpers.redirect(res, req.query.p);
+	}
+
+	res.render('', {});
+};
 
 Controllers.confirmEmail = function(req, res, next) {
-	user.email.confirm(req.params.code, function (data) {
-		data.status = data.status === 'ok';
-		res.render('confirm', data);
+	user.email.confirm(req.params.code, function (err) {
+		res.render('confirm', {
+			error: err ? err.message : ''
+		});
 	});
 };
 
 Controllers.sitemap = function(req, res, next) {
-	if (meta.config['feeds:disableSitemap'] === '1') {
-		return res.redirect(nconf.get('relative_path') + '/404')
+	if (parseInt(meta.config['feeds:disableSitemap'], 10) === 1) {
+		return next();
 	}
 
 	var sitemap = require('../sitemap.js');
@@ -214,16 +190,23 @@ Controllers.robots = function (req, res) {
 Controllers.outgoing = function(req, res, next) {
 	var url = req.query.url,
 		data = {
-			url: url,
-			title: meta.config.title
+			url: validator.escape(url),
+			title: meta.config.title,
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[notifications:outgoing_link]]'}])
 		};
 
 	if (url) {
 		res.render('outgoing', data);
 	} else {
-		res.status(404);
-		res.redirect(nconf.get('relative_path') + '/404');
+		res.status(404).redirect(nconf.get('relative_path') + '/404');
 	}
+};
+
+Controllers.termsOfUse = function(req, res, next) {
+	if (!meta.config.termsOfUse) {
+		return next();
+	}
+	res.render('tos', {termsOfUse: meta.config.termsOfUse});
 };
 
 module.exports = Controllers;

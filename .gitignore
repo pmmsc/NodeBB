@@ -3,12 +3,11 @@ node_modules/
 sftp-config.json
 config.json
 public/src/nodebb.min.js
-public/config.json
+!src/views/config.json
 public/css/*.css
 *.sublime-project
 *.sublime-workspace
 .project
-.idea
 *.swp
 Vagrantfile
 .vagrant
@@ -17,12 +16,28 @@ provision.sh
 .DS_Store
 feeds/recent.rss
 
-# winston?
-error.log
-events.log
+logs/
 
 pidfile
 
 # templates
 /public/templates
 /public/sounds
+
+/public/uploads
+
+# compiled files
+/public/stylesheet.css
+/public/admin.css
+/public/nodebb.min.js
+/public/nodebb.min.js.map
+
+# Covers JetBrains IDEs: IntelliJ, RubyMine, PhpStorm, AppCode, PyCharm, CLion, Android Studio
+*.iml
+
+## Directory-based project format:
+.idea/
+
+## File-based project format:
+*.ipr
+*.iws

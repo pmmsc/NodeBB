@@ -2,122 +2,210 @@
 
 var categoriesController = {},
 	async = require('async'),
-	qs = require('querystring'),
 	nconf = require('nconf'),
+	validator = require('validator'),
+
+	db = require('../database'),
 	privileges = require('../privileges'),
-	user = require('./../user'),
-	categories = require('./../categories'),
-	topics = require('./../topics'),
-	meta = require('./../meta'),
-	plugins = require('./../plugins');
+	user = require('../user'),
+	categories = require('../categories'),
+	meta = require('../meta'),
+	plugins = require('../plugins'),
+	pagination = require('../pagination'),
+	helpers = require('./helpers'),
+	utils = require('../../public/src/utils');
 
-categoriesController.recent = function(req, res, next) {
-	var uid = req.user ? req.user.uid : 0;
-	topics.getLatestTopics(uid, 0, 19, req.params.term, function (err, data) {
-		if(err) {
+
+categoriesController.list = function(req, res, next) {
+	async.parallel({
+		header: function (next) {
+			res.locals.metaTags = [{
+				name: "title",
+				content: validator.escape(meta.config.title || 'NodeBB')
+			}, {
+				name: "description",
+				content: validator.escape(meta.config.description || '')
+			}, {
+				property: 'og:title',
+				content: '[[pages:categories]]'
+			}, {
+				property: 'og:type',
+				content: 'website'
+			}];
+
+			if (meta.config['brand:logo']) {
+				res.locals.metaTags.push({
+					property: 'og:image',
+					content: meta.config['brand:logo']
+				});
+			}
+
+			next(null);
+		},
+		categories: function (next) {
+			var categoryData;
+			async.waterfall([
+				function(next) {
+					categories.getCategoriesByPrivilege('cid:0:children', req.uid, 'find', next);
+				},
+				function(_categoryData, next) {
+					categoryData = _categoryData;
+
+					var allCategories = [];
+					categories.flattenCategories(allCategories, categoryData);
+
+					categories.getRecentTopicReplies(allCategories, req.uid, next);
+				}
+			], function(err) {
+				next(err, categoryData);
+			});
+		}
+	}, function (err, data) {
+		if (err) {
 			return next(err);
 		}
 
-		data['feeds:disableRSS'] = meta.config['feeds:disableRSS'] === '1' ? true : false;
+		data.title = '[[pages:categories]]';
+		if (req.path.startsWith('/api/categories') || req.path.startsWith('/categories')) {
+			data.breadcrumbs = helpers.buildBreadcrumbs([{text: data.title}]);
+		}
 
-		plugins.fireHook('filter:category.get', data, uid, function(err, data) {
-			res.render('recent', data);
+		plugins.fireHook('filter:categories.build', {req: req, res: res, templateData: data}, function(err, data) {
+			if (err) {
+				return next(err);
+			}
+			res.render('categories', data.templateData);
 		});
 	});
 };
 
-categoriesController.popular = function(req, res, next) {
-	var uid = req.user ? req.user.uid : 0;
-
-	var term = req.params.term || 'daily';
-
-	topics.getPopular(term, uid, function(err, data) {
-		if(err) {
-			return next(err);
-		}
-
-		data['feeds:disableRSS'] = meta.config['feeds:disableRSS'] === '1' ? true : false;
-
-		plugins.fireHook('filter:category.get', {topics: data}, uid, function(err, data) {
-			res.render('popular', data);
-		});
-	});
-};
-
-categoriesController.unread = function(req, res, next) {
-	var uid = req.user ? req.user.uid : 0;
-
-	topics.getUnreadTopics(uid, 0, 20, function (err, data) {
-		if(err) {
-			return next(err);
-		}
-
-		plugins.fireHook('filter:category.get', data, uid, function(err, data) {
-			res.render('unread', data);
-		});
-	});
-};
-
-categoriesController.unreadTotal = function(req, res, next) {
-	var uid = req.user ? req.user.uid : 0;
-
-	topics.getTotalUnread(uid, function (err, data) {
-		if(err) {
-			return next(err);
-		}
-
-		res.json(data);
-	});
-};
-
-categoriesController.get = function(req, res, next) {
+categoriesController.get = function(req, res, callback) {
 	var cid = req.params.category_id,
-		page = req.query.page || 1,
-		uid = req.user ? req.user.uid : 0;
+		page = parseInt(req.query.page, 10) || 1,
+		userPrivileges;
+
+	if ((req.params.topic_index && !utils.isNumber(req.params.topic_index)) || !utils.isNumber(cid)) {
+		return callback();
+	}
 
 	async.waterfall([
 		function(next) {
-			categories.getCategoryField(cid, 'disabled', next);
+			async.parallel({
+				exists: function(next) {
+					categories.exists(cid, next);
+				},
+				categoryData: function(next) {
+					categories.getCategoryFields(cid, ['slug', 'disabled', 'topic_count'], next);
+				},
+				privileges: function(next) {
+					privileges.categories.get(cid, req.uid, next);
+				},
+				userSettings: function(next) {
+					user.getSettings(req.uid, next);
+				}
+			}, next);
 		},
-		function(disabled, next) {
-			if (parseInt(disabled, 10) === 1) {
-				return next(new Error('[[error:category-disabled]]'));
+		function(results, next) {
+			userPrivileges = results.privileges;
+
+			if (!results.exists || (results.categoryData && parseInt(results.categoryData.disabled, 10) === 1)) {
+				return callback();
 			}
 
-			privileges.categories.get(cid, uid, next);
-		},
-		function (privileges, next) {
-			if (!privileges.read) {
-				return next(new Error('[[error:no-privileges]]'));
+			if (!results.privileges.read) {
+				return helpers.notAllowed(req, res);
 			}
 
-			user.getSettings(uid, function(err, settings) {
+			if ((!req.params.slug || results.categoryData.slug !== cid + '/' + req.params.slug) && (results.categoryData.slug && results.categoryData.slug !== cid + '/')) {
+				return helpers.redirect(res, '/category/' + encodeURI(results.categoryData.slug));
+			}
+
+			var settings = results.userSettings;
+			var topicIndex = utils.isNumber(req.params.topic_index) ? parseInt(req.params.topic_index, 10) - 1 : 0;
+			var topicCount = parseInt(results.categoryData.topic_count, 10);
+			var pageCount = Math.max(1, Math.ceil(topicCount / settings.topicsPerPage));
+
+			if (topicIndex < 0 || topicIndex > Math.max(topicCount - 1, 0)) {
+				return helpers.redirect(res, '/category/' + cid + '/' + req.params.slug + (topicIndex > topicCount ? '/' + topicCount : ''));
+			}
+
+			if (settings.usePagination && (page < 1 || page > pageCount)) {
+				return callback();
+			}
+
+			if (!settings.usePagination) {
+				topicIndex = Math.max(topicIndex - (settings.topicsPerPage - 1), 0);
+			} else if (!req.query.page) {
+				var index = Math.max(parseInt((topicIndex || 0), 10), 0);
+				page = Math.ceil((index + 1) / settings.topicsPerPage);
+				topicIndex = 0;
+			}
+
+			var set = 'cid:' + cid + ':tids',
+				reverse = false;
+
+			if (settings.categoryTopicSort === 'newest_to_oldest') {
+				reverse = true;
+			} else if (settings.categoryTopicSort === 'most_posts') {
+				reverse = true;
+				set = 'cid:' + cid + ':tids:posts';
+			}
+
+			var start = (page - 1) * settings.topicsPerPage + topicIndex,
+				stop = start + settings.topicsPerPage - 1;
+
+			next(null, {
+				cid: cid,
+				set: set,
+				reverse: reverse,
+				start: start,
+				stop: stop,
+				uid: req.uid
+			});
+		},
+		function(payload, next) {
+			user.getUidByUserslug(req.query.author, function(err, uid) {
+				payload.targetUid = uid;
+				if (uid) {
+					payload.set = 'cid:' + cid + ':uid:' + uid + ':tids';
+				}
+				next(err, payload);
+			});
+		},
+		function(payload, next) {
+			categories.getCategoryById(payload, next);
+		},
+		function(categoryData, next) {
+			if (categoryData.link) {
+				db.incrObjectField('category:' + categoryData.cid, 'timesClicked');
+				return res.redirect(categoryData.link);
+			}
+
+			var breadcrumbs = [
+				{
+					text: categoryData.name,
+					url: nconf.get('relative_path') + '/category/' + categoryData.slug
+				}
+			];
+			helpers.buildCategoryBreadcrumbs(categoryData.parentCid, function(err, crumbs) {
 				if (err) {
 					return next(err);
 				}
-
-				var topicIndex = 0;
-				if (!settings.usePagination) {
-					topicIndex = Math.max((req.params.topic_index || 1) - (settings.topicsPerPage - 1), 0);
-				} else if (!req.query.page) {
-					var index = Math.max(parseInt((req.params.topic_index || 0), 10), 0);
-					page = Math.ceil((index + 1) / settings.topicsPerPage);
-				}
-
-				var start = (page - 1) * settings.topicsPerPage + topicIndex,
-					end = start + settings.topicsPerPage - 1;
-
-				categories.getCategoryById(cid, start, end, uid, function (err, categoryData) {
-					if (err) {
-						return next(err);
-					}
-
-					categoryData.privileges = privileges;
-					next(err, categoryData);
-				});
+				categoryData.breadcrumbs = crumbs.concat(breadcrumbs);
+				next(null, categoryData);
+			});
+		},
+		function(categoryData, next) {
+			var allCategories = [];
+			categories.flattenCategories(allCategories, [categoryData]);
+			categories.getRecentTopicReplies(allCategories, req.uid, function(err) {
+				next(err, categoryData);
 			});
 		},
 		function (categoryData, next) {
+			categoryData.privileges = userPrivileges;
+			categoryData.showSelect = categoryData.privileges.editable;
+
 			res.locals.metaTags = [
 				{
 					name: 'title',
@@ -137,7 +225,7 @@ categoriesController.get = function(req, res, next) {
 				}
 			];
 
-			if(categoryData.backgroundImage) {
+			if (categoryData.backgroundImage) {
 				res.locals.metaTags.push({
 					name: 'og:image',
 					content: categoryData.backgroundImage
@@ -160,32 +248,27 @@ categoriesController.get = function(req, res, next) {
 		}
 	], function (err, data) {
 		if (err) {
-			return res.locals.isAPI ? res.json(404, 'not-found') : res.redirect(nconf.get('relative_path') + '/404');
-		}
-
-		if (data.link) {
-			return res.redirect(data.link);
-		}
-
-		var category_url = cid + (req.params.slug ? '/' + req.params.slug : '');
-		var queryString = qs.stringify(req.query);
-		if(queryString.length) {
-			category_url += '?' + queryString;
+			return callback(err);
 		}
 
 		data.currentPage = page;
-		data['feeds:disableRSS'] = meta.config['feeds:disableRSS'] === '1' ? true : false;
+		data['feeds:disableRSS'] = parseInt(meta.config['feeds:disableRSS'], 10) === 1;
+		data.rssFeedUrl = nconf.get('relative_path') + '/category/' + data.cid + '.rss';
+		data.pagination = pagination.create(data.currentPage, data.pageCount);
+		data.title = data.name;
+		data.pagination.rel.forEach(function(rel) {
+			res.locals.linkTags.push(rel);
+		});
 
-		// Paginator for noscript
-		data.pages = [];
-		for(var x=1;x<=data.pageCount;x++) {
-			data.pages.push({
-				page: x,
-				active: x === parseInt(page, 10)
-			});
-		}
-		res.render('category', data);
+		plugins.fireHook('filter:category.build', {req: req, res: res, templateData: data}, function(err, data) {
+			if (err) {
+				return callback(err);
+			}
+			res.render('category', data.templateData);
+		});
 	});
 };
+
+
 
 module.exports = categoriesController;

@@ -1,41 +1,52 @@
 'use strict';
 
 var fs = require('fs'),
-	gm = require('gm').subClass({imageMagick: true});
+	lwip = require('lwip'),
+	plugins = require('./plugins');
 
 var image = {};
 
 image.resizeImage = function(path, extension, width, height, callback) {
-	function done(err, stdout, stderr) {
-		callback(err);
-	}
-
-	if(extension === '.gif') {
-		gm().in(path)
-			.in('-coalesce')
-			.in('-resize')
-			.in(width+'x'+height+'^')
-			.write(path, done);
+	if (plugins.hasListeners('filter:image.resize')) {
+		plugins.fireHook('filter:image.resize', {
+			path: path,
+			extension: extension,
+			width: width,
+			height: height
+		}, function(err, data) {
+			callback(err);
+		});
 	} else {
-		gm(path)
-			.in('-resize')
-			.in(width+'x'+height+'^')
-			.gravity('Center')
-			.crop(width, height)
-			.write(path, done);
-	}
-};
-
-image.convertImageToPng = function(path, extension, callback) {
-	if(extension !== '.png') {
-		gm(path).toBuffer('png', function(err, buffer) {
+		lwip.open(path, function(err, image) {
 			if (err) {
 				return callback(err);
 			}
-			fs.writeFile(path, buffer, 'binary', callback);
+
+			image.batch()
+				.cover(width, height)
+				.crop(width, height)
+				.writeFile(path, function(err) {
+					callback(err);
+				});
+			});
+	}
+};
+
+image.normalise = function(path, extension, callback) {
+	if (plugins.hasListeners('filter:image.normalise')) {
+		plugins.fireHook('filter:image.normalise', {
+			path: path,
+			extension: extension
+		}, function(err, data) {
+			callback(err);
 		});
 	} else {
-		callback();
+		lwip.open(path, function(err, image) {
+			if (err) {
+				return callback(err);
+			}
+			image.writeFile(path, 'png', callback);
+		});
 	}
 };
 

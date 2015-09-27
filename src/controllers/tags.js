@@ -3,57 +3,85 @@
 var tagsController = {},
 	async = require('async'),
 	nconf = require('nconf'),
-	topics = require('./../topics');
+	validator = require('validator'),
+	meta = require('../meta'),
+	user = require('../user'),
+	topics = require('../topics'),
+	helpers =  require('./helpers');
 
 tagsController.getTag = function(req, res, next) {
-	var tag = req.params.tag;
-	var uid = req.user ? req.user.uid : 0;
+	var tag = validator.escape(req.params.tag);
+	var stop = (parseInt(meta.config.topicsPerList, 10) || 20) - 1;
 
-	topics.getTagTids(tag, 0, 19, function(err, tids) {
+	async.waterfall([
+		function(next) {
+			topics.getTagTids(tag, 0, stop, next);
+		},
+		function(tids, next) {
+			if (Array.isArray(tids) && !tids.length) {
+				topics.deleteTag(tag);
+				return res.render('tag', {
+					topics: [],
+					tag: tag,
+					breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]', url: '/tags'}, {text: tag}])
+				});
+			}
+
+			async.parallel({
+				isAdmin: async.apply(user.isAdministrator, req.uid),
+				topics: async.apply(topics.getTopics, tids, req.uid)
+			}, next);
+		}
+	], function(err, results) {
 		if (err) {
 			return next(err);
 		}
 
-		if (Array.isArray(tids) && !tids.length) {
-			topics.deleteTag(tag);
-			return res.render('tag', {topics: [], tag:tag});
+		if (!results.isAdmin) {
+			results.topics = results.topics.filter(function(topic) {
+				return topic && !topic.deleted;
+			});
 		}
 
-		topics.getTopics('tag:' + tag + ':topics', uid, tids, function(err, data) {
-			if (err) {
-				return next(err);
+		res.locals.metaTags = [
+			{
+				name: 'title',
+				content: tag
+			},
+			{
+				property: 'og:title',
+				content: tag
+			},
+			{
+				property: 'og:url',
+				content: nconf.get('url') + '/tags/' + tag
 			}
+		];
 
-			res.locals.metaTags = [
-				{
-					name: "title",
-					content: tag
-				},
-				{
-					property: 'og:title',
-					content: tag
-				},
-				{
-					property: "og:url",
-					content: nconf.get('url') + '/tags/' + tag
-				}
-			];
-
-			data.tag = tag;
-			res.render('tag', data);
-		});
+		var data = {
+			topics: results.topics,
+			tag: tag,
+			nextStart: stop + 1,
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]', url: '/tags'}, {text: tag}]),
+			title: '[[pages:tag, ' + tag + ']]'
+		};
+		res.render('tag', data);
 	});
 };
 
 tagsController.getTags = function(req, res, next) {
-	topics.getTags(0, -1, function(err, tags) {
+	topics.getTags(0, 99, function(err, tags) {
 		if (err) {
 			return next(err);
 		}
-
-		res.render('tags', {tags: tags});
+		var data = {
+			tags: tags,
+			nextStart: 100,
+			breadcrumbs: helpers.buildBreadcrumbs([{text: '[[tags:tags]]'}]),
+			title: '[[pages:tags]]'
+		};
+		res.render('tags', data);
 	});
-
 };
 
 module.exports = tagsController;

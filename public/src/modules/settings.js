@@ -9,7 +9,8 @@ define('settings', function () {
 		'settings/textarea',
 		'settings/select',
 		'settings/array',
-		'settings/key'
+		'settings/key',
+		'settings/object'
 	];
 
 	var Settings,
@@ -293,11 +294,11 @@ define('settings', function () {
 							message: "NodeBB failed to save the settings.",
 							timeout: 5000
 						});
-						console.log('[settings] Unable to set settings for hash: ', hash);
 					} else {
 						app.alert({
 							title: 'Settings Saved',
 							type: 'success',
+							message: "Settings have been successfully saved",
 							timeout: 2500
 						});
 					}
@@ -385,7 +386,6 @@ define('settings', function () {
 				hash: hash
 			}, function (err, values) {
 				if (err) {
-					console.log('[settings] Unable to load settings for hash: ', hash);
 					if (typeof callback === 'function') {
 						callback(err);
 					}
@@ -448,17 +448,32 @@ define('settings', function () {
 			helper.persistSettings(hash, Settings.cfg, notify, callback);
 		},
 		load: function (hash, formEl, callback) {
+			callback = callback || function() {};
 			socket.emit('admin.settings.get', {
 				hash: hash
 			}, function (err, values) {
-				if (!err) {
-					$(formEl).deserialize(values);
-					if (typeof callback === 'function') {
-						callback();
-					}
-				} else {
-					console.log('[settings] Unable to load settings for hash: ', hash);
+				if (err) {
+					return callback(err);
 				}
+
+				// Parse all values. If they are json, return json
+				for(var key in values) {
+					if (values.hasOwnProperty(key)) {
+						try {
+							values[key] = JSON.parse(values[key]);
+						} catch (e) {
+							// Leave the value as is
+						}
+					}
+				}
+
+				$(formEl).deserialize(values);
+				$(formEl).find('input[type="checkbox"]').each(function() {
+					$(this).parents('.mdl-switch').toggleClass('is-checked', $(this).is(':checked'));
+				});
+				$(window).trigger('action:admin.settingsLoaded');
+
+				callback(null, values);
 			});
 		},
 		save: function (hash, formEl, callback) {
@@ -469,9 +484,16 @@ define('settings', function () {
 				formEl.find('input[type="checkbox"]').each(function (idx, inputEl) {
 					inputEl = $(inputEl);
 					if (!inputEl.is(':checked')) {
-						values[inputEl.attr('id')] = 'off';
+						values[inputEl.attr('name')] = 'off';
 					}
 				});
+
+				// Normalizing value of multiple selects
+				formEl.find('select[multiple]').each(function(idx, selectEl) {
+					selectEl = $(selectEl);
+					values[selectEl.attr('name')] = JSON.stringify(selectEl.val());
+				});
+
 				socket.emit('admin.settings.set', {
 					hash: hash,
 					values: values
@@ -486,8 +508,6 @@ define('settings', function () {
 						});
 					}
 				});
-			} else {
-				console.log('[settings] Form not found.');
 			}
 		}
 	};

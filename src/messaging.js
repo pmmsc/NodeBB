@@ -2,29 +2,53 @@
 
 var db = require('./database'),
 	async = require('async'),
+	nconf = require('nconf'),
 	winston = require('winston'),
 	user = require('./user'),
 	plugins = require('./plugins'),
 	meta = require('./meta'),
 	utils = require('../public/src/utils'),
 	notifications = require('./notifications'),
-	userNotifications = require('./user/notifications');
-
+	userNotifications = require('./user/notifications'),
+	emailer = require('./emailer'),
+	sockets = require('./socket.io');
 
 (function(Messaging) {
+	Messaging.notifyQueue = {};	// Only used to notify a user of a new chat message, see Messaging.notifyUser
+
+	var terms = {
+		day: 86400000,
+		week: 604800000,
+		month: 2592000000,
+		threemonths: 7776000000
+	};
 
 	function sortUids(fromuid, touid) {
 		return [fromuid, touid].sort();
 	}
 
-	Messaging.addMessage = function(fromuid, touid, content, callback) {
+	Messaging.addMessage = function(fromuid, touid, content, timestamp, callback) {
+		if (typeof timestamp === 'function') {
+			callback = timestamp;
+			timestamp = Date.now();
+		} else {
+			timestamp = timestamp || Date.now();
+		}
+
+		if (!content) {
+			return callback(new Error('[[error:invalid-chat-message]]'));
+		}
+
+		if (content.length > (meta.config.maximumChatMessageLength || 1000)) {
+			return callback(new Error('[[error:chat-message-too-long]]'));
+		}
+
 		var uids = sortUids(fromuid, touid);
 
 		db.incrObjectField('global', 'nextMid', function(err, mid) {
 			if (err) {
 				return callback(err);
 			}
-			var timestamp = Date.now();
 			var message = {
 				content: content,
 				timestamp: timestamp,
@@ -45,7 +69,6 @@ var db = require('./database'),
 				}
 
 				async.parallel([
-					async.apply(addToRecent, fromuid, message),
 					async.apply(db.sortedSetAdd, 'messages:uid:' + uids[0] + ':to:' + uids[1], timestamp, mid),
 					async.apply(Messaging.updateChatTime, fromuid, touid),
 					async.apply(Messaging.updateChatTime, touid, fromuid),
@@ -65,8 +88,14 @@ var db = require('./database'),
 								if (err) {
 									return next(err);
 								}
+
+								if (!messages || !messages[0]) {
+									return next(null, null);
+								}
+
 								messages[0].newSet = isNewSet;
-								next(null, messages ? messages[0] : null);
+								messages[0].mid = mid;
+								next(null, messages[0]);
 							});
 						}
 					], callback);
@@ -75,20 +104,22 @@ var db = require('./database'),
 		});
 	};
 
-	function addToRecent(fromuid, message, callback) {
-		db.listPrepend('messages:recent:' + fromuid, message.content, function(err) {
-			if (err) {
-				return callback(err);
-			}
+	Messaging.getMessages = function(params, callback) {
+		var fromuid = params.fromuid,
+			touid = params.touid,
+			since = params.since,
+			isNew = params.isNew,
+			count = params.count || parseInt(meta.config.chatMessageInboxSize, 10) || 250;
 
-			db.listTrim('messages:recent:' + fromuid, 0, 9, callback);
-		});
-	}
+		var uids = sortUids(fromuid, touid),
+			min = params.count ? 0 : Date.now() - (terms[since] || terms.day);
 
-	Messaging.getMessages = function(fromuid, touid, isNew, callback) {
-		var uids = sortUids(fromuid, touid);
+		if (since === 'recent') {
+			count = 49;
+			min = 0;
+		}
 
-		db.getSortedSetRevRange('messages:uid:' + uids[0] + ':to:' + uids[1], 0, (meta.config.chatMessagesToDisplay || 50) - 1, function(err, mids) {
+		db.getSortedSetRevRangeByScore('messages:uid:' + uids[0] + ':to:' + uids[1], 0, count, '+inf', min, function(err, mids) {
 			if (err) {
 				return callback(err);
 			}
@@ -102,8 +133,7 @@ var db = require('./database'),
 			getMessages(mids, fromuid, touid, isNew, callback);
 		});
 
-		// Mark any chat notifications pertaining to this chat as read
-		notifications.markReadByUniqueId(fromuid, 'chat_' + touid + '_' + fromuid, function(err) {
+		notifications.markRead('chat_' + touid + '_' + fromuid, fromuid, function(err) {
 			if (err) {
 				winston.error('[messaging] Could not mark notifications related to this chat as read: ' + err.message);
 			}
@@ -125,6 +155,7 @@ var db = require('./database'),
 			async.waterfall([
 				async.apply(db.getObjects, keys),
 				function(messages, next) {
+					messages = messages.filter(Boolean);
 					async.map(messages, function(message, next) {
 						var self = parseInt(message.fromuid, 10) === parseInt(fromuid, 10);
 						message.fromUser = self ? userData[0] : userData[1];
@@ -146,6 +177,9 @@ var db = require('./database'),
 						if (index > 0 && parseInt(message.timestamp, 10) > parseInt(messages[index-1].timestamp, 10) + (1000*60*5)) {
 							// If it's been 5 minutes, this is a new set of messages
 							message.newSet = true;
+						} else if (index > 0 && message.fromuid !== messages[index-1].fromuid) {
+							// If the previous message was from the other person, this is also a new set
+							message.newSet = true;
 						}
 
 						return message;
@@ -158,7 +192,7 @@ var db = require('./database'),
 	}
 
 	Messaging.parse = function (message, fromuid, myuid, toUserData, myUserData, isNew, callback) {
-		plugins.fireHook('filter:post.parse', message, function(err, parsed) {
+		plugins.fireHook('filter:parse.raw', message, function(err, parsed) {
 			if (err) {
 				return callback(message);
 			}
@@ -194,14 +228,14 @@ var db = require('./database'),
 				}
 			},
 			function(mids, next) {
-				if (typeof mids !== 'boolean') {
+				if (typeof mids !== 'boolean' && mids && mids.length) {
 					db.getObjects(['message:' + mids[0], 'message:' + mids[1]], next);
 				} else {
 					next(null, mids);
 				}
 			},
 			function(messages, next) {
-				if (typeof messages !== 'boolean') {
+				if (typeof messages !== 'boolean' && messages && messages.length) {
 					next(null, parseInt(messages[1].timestamp, 10) > parseInt(messages[0].timestamp, 10) + (1000*60*5));
 				} else {
 					next(null, messages);
@@ -215,39 +249,65 @@ var db = require('./database'),
 		db.sortedSetAdd('uid:' + uid + ':chats', Date.now(), toUid, callback);
 	};
 
-	Messaging.getRecentChats = function(uid, start, end, callback) {
-		db.getSortedSetRevRange('uid:' + uid + ':chats', start, end, function(err, uids) {
-			if(err) {
+	Messaging.getRecentChats = function(uid, start, stop, callback) {
+		db.getSortedSetRevRange('uid:' + uid + ':chats', start, stop, function(err, uids) {
+			if (err) {
 				return callback(err);
 			}
 
-			db.isSortedSetMembers('uid:' + uid + ':chats:unread', uids, function(err, unreadUids) {
+			async.parallel({
+				unread: function(next) {
+					db.isSortedSetMembers('uid:' + uid + ':chats:unread', uids, next);
+				},
+				users: function(next) {
+					user.getMultipleUserFields(uids, ['uid', 'username', 'picture', 'status'] , next);
+				},
+				teasers: function(next) {
+					async.map(uids, function(fromuid, next) {
+						Messaging.getMessages({
+							fromuid: fromuid,
+							touid: uid,
+							isNew: false,
+							count: 1
+						}, function(err, teaser) {
+							next(err, teaser[0]);
+						});
+					}, next);
+				}
+			}, function(err, results) {
 				if (err) {
 					return callback(err);
 				}
 
-				user.isOnline(uids, function(err, users) {
-					if (err) {
-						return callback(err);
+				results.users.forEach(function(user, index) {
+					if (user && parseInt(user.uid, 10)) {
+						Messaging.markRead(uid, uids[index]);
+						user.unread = results.unread[index];
+						user.status = sockets.isUserOnline(user.uid) ? user.status : 'offline';
+						user.teaser = results.teasers[index];
 					}
-
-					users.forEach(function(user, index) {
-						if (user) {
-							user.unread = unreadUids[index];
-						}
-					});
-
-					users = users.filter(function(user) {
-						return !!user.uid;
-					});
-					callback(null, users);
 				});
+
+				results.users = results.users.filter(function(user) {
+					return user && parseInt(user.uid, 10);
+				});
+
+				callback(null, {users: results.users, nextStart: stop + 1});
 			});
 		});
 	};
 
 	Messaging.getUnreadCount = function(uid, callback) {
 		db.sortedSetCard('uid:' + uid + ':chats:unread', callback);
+	};
+
+	Messaging.pushUnreadCount = function(uid) {
+		Messaging.getUnreadCount(uid, function(err, unreadCount) {
+			if (err) {
+				return;
+			}
+			sockets.in('uid_' + uid).emit('event:unread.updateChatCount', null, unreadCount);
+		});
 	};
 
 	Messaging.markRead = function(uid, toUid, callback) {
@@ -258,70 +318,120 @@ var db = require('./database'),
 		db.sortedSetAdd('uid:' + uid + ':chats:unread', Date.now(), toUid, callback);
 	};
 
-	/*
-	todo #1798 -- this utility method creates a room name given an array of uids.
-
-	Messaging.uidsToRoom = function(uids, callback) {
-		uid = parseInt(uid, 10);
-		if (typeof uid === 'number' && Array.isArray(roomUids)) {
-			var room = 'chat_';
-
-			room = room + roomUids.map(function(uid) {
-				return parseInt(uid, 10);
-			}).sort(function(a, b) {
-				return a-b;
-			}).join('_');
-
-			callback(null, room);
-		} else {
-			callback(new Error('invalid-uid-or-participant-uids'));
-		}
-	};*/
-
-	Messaging.verifySpammer = function(uid, callback) {
-		var messagesToCompare = 10;
-
-		db.getListRange('messages:recent:' + uid, 0, messagesToCompare - 1, function(err, msgs) {
-			var total = 0;
-
-			for (var i = 0, ii = msgs.length - 1; i < ii; ++i) {
-				total += areTooSimilar(msgs[i], msgs[i+1]) ? 1 : 0;
-			}
-
-			var isSpammer = total === messagesToCompare - 1;
-			if (isSpammer) {
-				db.delete('messages:recent:' + uid);
-			}
-
-			callback(err, isSpammer);
+	Messaging.notifyUser = function(fromuid, touid, messageObj) {
+		// Immediate notifications
+		// Recipient
+		Messaging.pushUnreadCount(touid);
+		sockets.in('uid_' + touid).emit('event:chats.receive', {
+			withUid: fromuid,
+			message: messageObj,
+			self: 0
 		});
+		// Sender
+		Messaging.pushUnreadCount(fromuid);
+		sockets.in('uid_' + fromuid).emit('event:chats.receive', {
+			withUid: touid,
+			message: messageObj,
+			self: 1
+		});
+
+		// Delayed notifications
+		var queueObj = Messaging.notifyQueue[fromuid + ':' + touid];
+		if (queueObj) {
+			queueObj.message.content += '\n' + messageObj.content;
+			clearTimeout(queueObj.timeout);
+		} else {
+			queueObj = Messaging.notifyQueue[fromuid + ':' + touid] = {
+				message: messageObj
+			};
+		}
+
+		queueObj.timeout = setTimeout(function() {
+			sendNotifications(fromuid, touid, queueObj.message, function(err) {
+				if (!err) {
+					delete Messaging.notifyQueue[fromuid + ':' + touid];
+				}
+			});
+		}, 1000*60);	// wait 60s before sending
 	};
 
-	// modified from http://en.wikibooks.org/wiki/Algorithm_Implementation/Strings/Levenshtein_distance
-	function areTooSimilar(a, b) {
-		var matrix = [];
-
-		for(var i = 0; i <= b.length; i++){
-			matrix[i] = [i];
+	Messaging.canMessage = function(fromUid, toUid, callback) {
+		if (parseInt(meta.config.disableChat) === 1) {
+			return callback(new Error('[[error:chat-disabled]]'));
+		} else if (toUid === fromUid) {
+			return callback(new Error('[[error:cant-chat-with-yourself]]'));
+		} else if (fromUid === 0) {
+			return callback(new Error('[[error:not-logged-in]]'));
 		}
 
-		for(var j = 0; j <= a.length; j++){
-			matrix[0][j] = j;
-		}
+		async.waterfall([
+			function(next) {
+				user.getUserFields(fromUid, ['banned', 'email:confirmed'], function(err, userData) {
+					if (err) {
+						return callback(err);
+					}
 
-		for(i = 1; i <= b.length; i++){
-			for(j = 1; j <= a.length; j++){
-				if(b.charAt(i-1) === a.charAt(j-1)){
-					matrix[i][j] = matrix[i-1][j-1];
-				} else {
-					matrix[i][j] = Math.min(matrix[i-1][j-1] + 1,
-					Math.min(matrix[i][j-1] + 1,
-					matrix[i-1][j] + 1));
+					if (parseInt(userData.banned, 10) === 1) {
+						return callback(new Error('[[error:user-banned]]'));
+					}
+
+					if (parseInt(meta.config.requireEmailConfirmation, 10) === 1 && parseInt(userData['email:confirmed'], 10) !== 1) {
+						return callback(new Error('[[error:email-not-confirmed-chat]]'));
+					}
+
+					next();
+				});
+			},
+			function(next) {
+				user.getSettings(toUid, next);
+			},
+			function(settings, next) {
+				if (!settings.restrictChat) {
+					return callback(null, true);
 				}
+
+				user.isAdministrator(fromUid, next);
+			},
+			function(isAdmin, next) {
+				if (isAdmin) {
+					return callback(null, true);
+				}
+				user.isFollowing(toUid, fromUid, next);
 			}
+		], callback);
+	};
+
+	function sendNotifications(fromuid, touid, messageObj, callback) {
+		if (sockets.isUserOnline(touid)) {
+			return callback();
 		}
 
-		return (matrix[b.length][a.length] / b.length < 0.1);
+		notifications.create({
+			bodyShort: '[[notifications:new_message_from, ' + messageObj.fromUser.username + ']]',
+			bodyLong: messageObj.content,
+			nid: 'chat_' + fromuid + '_' + touid,
+			from: fromuid,
+			path: '/chats/' + messageObj.fromUser.username
+		}, function(err, notification) {
+			if (!err && notification) {
+				notifications.push(notification, [touid], callback);
+			}
+		});
+
+		user.getSettings(messageObj.toUser.uid, function(err, settings) {
+			if (settings.sendChatNotifications && !parseInt(meta.config.disableEmailSubscriptions, 10)) {
+				emailer.send('notif_chat', touid, {
+					subject: '[[email:notif.chat.subject, ' + messageObj.fromUser.username + ']]',
+					username: messageObj.toUser.username,
+					userslug: utils.slugify(messageObj.toUser.username),
+					summary: '[[notifications:new_message_from, ' + messageObj.fromUser.username + ']]',
+					message: messageObj,
+					site_title: meta.config.title || 'NodeBB',
+					url: nconf.get('url'),
+					fromUserslug: utils.slugify(messageObj.fromUser.username)
+				});
+			}
+		});
 	}
 
 }(exports));

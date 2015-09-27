@@ -8,62 +8,47 @@ var async = require('async'),
 
 module.exports = function(Topics) {
 
-	Topics.getPopular = function(term, uid, callback) {
-		var terms = {
-			daily: 'day',
-			weekly: 'week',
-			monthly: 'month',
-			yearly: 'year'
-		};
+	Topics.getPopular = function(term, uid, count, callback) {
+		count = parseInt(count, 10) || 20;
 
-		var since = terms[term] || 'day';
+		if (term === 'alltime') {
+			return getAllTimePopular(uid, count, callback);
+		}
 
 		async.waterfall([
 			function(next) {
-				Topics.getLatestTids(0, -1, since, next);
+				Topics.getLatestTidsFromSet('topics:tid', 0, -1, term, next);
 			},
 			function(tids, next) {
-				getTopics(tids, uid, next);
-			},
-			function(topics, next) {
-				var tids = topics.map(function(topic) {
-					return topic.tid;
-				});
-
-				privileges.topics.filter('read', tids, uid, function(err, tids) {
-					if (err) {
-						return next(err);
-					}
-
-					topics = topics.filter(function(topic) {
-						return tids.indexOf(topic.tid) !== -1;
-					});
-
-					next(null, topics);
-				});
+				getTopics(tids, uid, count, next);
 			}
 		], callback);
 	};
 
-	function getTopics(tids, uid, callback) {
-		var keys = tids.map(function(tid) {
-			return 'topic:' + tid;
+	function getAllTimePopular(uid, count, callback) {
+		Topics.getTopicsFromSet('topics:posts', uid, 0, count - 1, function(err, data) {
+			callback(err, data ? data.topics : null);
 		});
+	}
 
-		db.getObjectsFields(keys, ['tid', 'postcount'], function(err, topics) {
-			if (err) {
-				return callback(err);
+	function getTopics(tids, uid, count, callback) {
+		async.waterfall([
+			function(next) {
+				Topics.getTopicsFields(tids, ['tid', 'postcount', 'deleted'], next);
+			},
+			function(topics, next) {
+				tids = topics.filter(function(topic) {
+					return topic && parseInt(topic.deleted, 10) !== 1;
+				}).sort(function(a, b) {
+					return b.postcount - a.postcount;
+				}).slice(0, count).map(function(topic) {
+					return topic.tid;
+				});
+				privileges.topics.filterTids('read', tids, uid, next);
+			},
+			function(tids, next) {
+				Topics.getTopicsByTids(tids, uid, next);
 			}
-
-			topics.sort(function(a, b) {
-				return parseInt(b.postcount, 10) - parseInt(a.postcount, 10);
-			});
-
-			topics = topics.slice(0, 20).map(function(topic) {
-				return topic.tid;
-			});
-
-			Topics.getTopicsByTids(topics, uid, callback);
-		});
+		], callback);
 	}
 };

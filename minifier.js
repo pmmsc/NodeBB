@@ -4,71 +4,71 @@ var uglifyjs = require('uglify-js'),
 	less = require('less'),
 	async = require('async'),
 	fs = require('fs'),
-	path = require('path'),
 	crypto = require('crypto'),
+	utils = require('./public/src/utils'),
 
 	Minifier = {
-		js: {},
-		css: {}
+		js: {}
 	};
 
 /* Javascript */
 Minifier.js.minify = function (scripts, minify, callback) {
-	var options = {};
-
 	scripts = scripts.filter(function(file) {
-		return fs.existsSync(file);
+		return fs.existsSync(file) && file.endsWith('.js');
 	});
 
-	if (!minify) {
-		options.sourceMapURL = '/nodebb.min.js.map';
-		options.outSourceMap = 'nodebb.min.js.map';
-		options.mangle = false;
-		options.compress = false;
-		options.prefix = 1;
-	}
-
-	try {
-		var minified = uglifyjs.minify(scripts, options),
-			hasher = crypto.createHash('md5'),
-			hash;
-
-		// Calculate js hash
-		hasher.update(minified.code, 'utf-8');
-		hash = hasher.digest('hex');
-		process.send({
-			type: 'hash',
-			payload: hash.slice(0, 8)
+	if (minify) {
+		minifyScripts(scripts, function() {
+			callback.apply(this, arguments);
 		});
-
-		callback({
-			js: minified.code,
-			map: minified.map
-		});
-	} catch(err) {
-		process.send({
-			type: 'error',
-			payload: err
-		});
+	} else {
+		concatenateScripts(scripts, callback);
 	}
 };
 
 process.on('message', function(payload) {
 	switch(payload.action) {
 	case 'js':
-		Minifier.js.minify(payload.scripts, payload.minify, function(data) {
-			process.stdout.write(data.js);
+		Minifier.js.minify(payload.scripts, payload.minify, function(minified/*, sourceMap*/) {
 			process.send({
 				type: 'end',
-				payload: 'script'
-			});
-
-			process.stderr.write(data.map);
-			process.send({
-				type: 'end',
-				payload: 'mapping'
+				// sourceMap: sourceMap,
+				minified: minified
 			});
 		});
 		break;
 	}
 });
+
+function minifyScripts(scripts, callback) {
+	// The portions of code involving the source map are commented out as they're broken in UglifyJS2
+	// Follow along here: https://github.com/mishoo/UglifyJS2/issues/700
+	try {
+		var minified = uglifyjs.minify(scripts, {
+				// outSourceMap: "nodebb.min.js.map",
+				compress: false
+			});
+
+		callback(minified.code/*, minified.map*/);
+	} catch(err) {
+		process.send({
+			type: 'error',
+			payload: err.message
+		});
+	}
+}
+
+function concatenateScripts(scripts, callback) {
+	async.map(scripts, fs.readFile, function(err, scripts) {
+		if (err) {
+			process.send({
+				type: 'error',
+				payload: err
+			});
+		}
+
+		scripts = scripts.join(require('os').EOL + ';');
+
+		callback(scripts);
+	});
+}

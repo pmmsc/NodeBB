@@ -1,28 +1,37 @@
 # <img alt="NodeBB" src="http://i.imgur.com/mYxPPtB.png" />
+
+[![Gitter](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/NodeBB/NodeBB?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
 [![Build Status](https://travis-ci.org/NodeBB/NodeBB.svg?branch=master)](https://travis-ci.org/NodeBB/NodeBB)
 [![Dependency Status](https://david-dm.org/nodebb/nodebb.svg)](https://david-dm.org/nodebb/nodebb)
-[![Code Climate](https://codeclimate.com/github/designcreateplay/NodeBB.png)](https://codeclimate.com/github/designcreateplay/NodeBB)
+[![Code Climate](https://codeclimate.com/github/NodeBB/NodeBB/badges/gpa.svg)](https://codeclimate.com/github/NodeBB/NodeBB)
 [![Documentation Status](https://readthedocs.org/projects/nodebb/badge/?version=latest)](https://readthedocs.org/projects/nodebb/?badge=latest)
 
-**NodeBB Forum Software** is powered by Node.js and built on a Redis database. It utilizes web sockets for instant interactions and real-time notifications. NodeBB is compatible down to IE8 and has many modern features out of the box such as social network integration and streaming discussions.
+[**NodeBB Forum Software**](https://nodebb.org) is powered by Node.js and built on either a Redis or MongoDB database. It utilizes web sockets for instant interactions and real-time notifications. NodeBB has many modern features out of the box such as social network integration and streaming discussions, while still making sure to be compatible with older browsers.
+
+Additional functionality is enabled through the use of third-party plugins.
 
 * [Get NodeBB](http://www.nodebb.org/ "NodeBB")
 * [Demo & Meta Discussion](http://community.nodebb.org)
+* [Documentation & Installation Instructions](http://docs.nodebb.org)
+* [Help translate NodeBB](https://www.transifex.com/projects/p/nodebb/)
 * [NodeBB Blog](http://blog.nodebb.org)
-* [Documentation](http://docs.nodebb.org) - includes setup instructions for other platforms
 * [Join us on IRC](https://kiwiirc.com/client/irc.freenode.net/nodebb) - #nodebb on Freenode
 * [Follow us on Twitter](http://www.twitter.com/NodeBB/ "NodeBB Twitter")
 * [Like us on Facebook](http://www.facebook.com/NodeBB/ "NodeBB Facebook")
-* [Get Plugins](http://community.nodebb.org/category/7/nodebb-plugins "NodeBB Plugins")
-* [Get Themes](http://community.nodebb.org/category/10/nodebb-themes "NodeBB Themes")
-* [Help translate NodeBB](https://www.transifex.com/projects/p/nodebb/)
 
 ## Screenshots
 
-[<img src="http://i.imgur.com/FLOUuIqb.png" />](http://i.imgur.com/FLOUuIq.png)&nbsp;[<img src="http://i.imgur.com/Ud1LrfIb.png" />](http://i.imgur.com/Ud1LrfI.png)&nbsp;[<img src="http://i.imgur.com/ZC8W39ab.png" />](http://i.imgur.com/ZC8W39a.png)&nbsp;[<img src="http://i.imgur.com/o90kVPib.png" />](http://i.imgur.com/o90kVPi.png)&nbsp;[<img src="http://i.imgur.com/AaRRrU2b.png" />](http://i.imgur.com/AaRRrU2.png)&nbsp;[<img src="http://i.imgur.com/LmHtPhob.png" />](http://i.imgur.com/LmHtPho.png)&nbsp;[<img src="http://i.imgur.com/paiJPJkb.jpg" />](http://i.imgur.com/paiJPJk.jpg)&nbsp;[<img src="http://i.imgur.com/ZfavPHDb.png" />](http://i.imgur.com/ZfavPHD.png)&nbsp;[<img src="http://i.imgur.com/8OLssij.png" />](http://i.imgur.com/8OLssij.png)&nbsp;[<img src="http://i.imgur.com/JKOc0LZ.png"/>](http://i.imgur.com/JKOc0LZ.png)
+[![](http://i.imgur.com/VCoOFyqb.png)](http://i.imgur.com/VCoOFyq.png)
+[![](http://i.imgur.com/FLOUuIqb.png)](http://i.imgur.com/FLOUuIq.png)
+[![](http://i.imgur.com/Ud1LrfIb.png)](http://i.imgur.com/Ud1LrfI.png)
+[![](http://i.imgur.com/h6yZ66sb.png)](http://i.imgur.com/h6yZ66s.png)
+[![](http://i.imgur.com/o90kVPib.png)](http://i.imgur.com/o90kVPi.png)
+[![](http://i.imgur.com/AaRRrU2b.png)](http://i.imgur.com/AaRRrU2.png)
+[![](http://i.imgur.com/LmHtPhob.png)](http://i.imgur.com/LmHtPho.png)
+[![](http://i.imgur.com/paiJPJkb.jpg)](http://i.imgur.com/paiJPJk.jpg)
 
-Credit: [Convoe](http://www.convoe.com), [Kano](http://www.kano.me), [Manchester United Forum](http://manutdforums.com/).
-
+[![](http://i.imgur.com/8OLssij.png)](http://i.imgur.com/8OLssij.png)
+[![](http://i.imgur.com/JKOc0LZ.png)](http://i.imgur.com/JKOc0LZ.png)
 
 ## How can I follow along/contribute?
 
@@ -37,7 +46,7 @@ Credit: [Convoe](http://www.convoe.com), [Kano](http://www.kano.me), [Manchester
 NodeBB requires the following software to be installed:
 
 * A version of Node.js at least 0.10 or greater
-* Redis, version 2.6 or greater **or** MongoDB, version 2.6 or greater
+* Redis, version 2.8.9 or greater **or** MongoDB, version 2.6 or greater
 * nginx, version 1.3.13 or greater (**only if** intending to use nginx to proxy requests to a NodeBB)
 
 ## Installation
@@ -61,4 +70,6 @@ Detailed upgrade instructions are listed in [Upgrading NodeBB](https://docs.node
 
 ## License
 
-NodeBB is licensed under the **GNU General Public License v3 (GPL-3)** (http://www.gnu.org/copyleft/gpl.html)
+NodeBB is licensed under the **GNU General Public License v3 (GPL-3)** (http://www.gnu.org/copyleft/gpl.html).
+
+Interested in a sublicense agreement for use of NodeBB in a non-free/restrictive environment? Contact us at sales@nodebb.org.
